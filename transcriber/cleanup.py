@@ -44,14 +44,10 @@ starting with "- ".
 
 ## Action items
 - One bullet per task that someone said they will do ("I will...", "I can...") or \
-was asked to do, in the form: OWNER: TASK (DEADLINE)
+was asked to do, in the form: OWNER: TASK
 
 Rules for action items:
 - OWNER_RULE
-- DEADLINE is when that particular task is due, in the words the speaker used for it \
-("today", "by Thursday", "the 20th"). Do not add a month, year or weekday that was \
-not spoken, and do not borrow a deadline from a different task. Leave the \
-parentheses out when no deadline was given.
 - A decision is a key point, not an action item, unless someone has to do something.
 - If there are no action items, write "- None"."""
 
