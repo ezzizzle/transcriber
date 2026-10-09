@@ -1,0 +1,375 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Transcriber</title>
+<style>
+  :root {
+    --bg: #f6f5f1; --card: #ffffff; --ink: #1d1c1a; --muted: #6f6c66; --line: #e3e0d8;
+    --accent: #2f5d50; --accent-ink: #ffffff; --accent-soft: #e4eeea; --danger: #a8382c;
+    --s1: #2f5d50; --s2: #9a4a1c; --s3: #3b4f9a; --s4: #8a2f6b; --s5: #5d6b12; --s6: #1c6f8a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161614; --card: #1f1f1c; --ink: #ecebe6; --muted: #9a978f; --line: #33322e;
+      --accent: #7dc4ae; --accent-ink: #10201b; --accent-soft: #24332e; --danger: #e8877b;
+      --s1: #7dc4ae; --s2: #e8a473; --s3: #9aaef0; --s4: #e293c6; --s5: #c1cf6a; --s6: #74c7e3;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  }
+  main { max-width: 820px; margin: 0 auto; padding: 40px 16px 80px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
+  #health, #user { font-size: 13px; color: var(--muted); }
+  #user:not(:empty) { margin-right: 14px; }
+  #health::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; }
+  #health.ok::before { background: var(--accent); }
+  #health.error::before { background: var(--danger); }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; }
+  #drop { padding: 28px 20px; text-align: center; border-style: dashed; border-width: 1.5px; cursor: pointer;
+    transition: border-color .15s, background .15s; }
+  #drop.over, #drop:focus-visible { border-color: var(--accent); background: var(--accent-soft); outline: none; }
+  #drop strong { display: block; font-size: 16px; margin-bottom: 2px; }
+  #drop span { color: var(--muted); font-size: 13px; }
+
+  .options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 28px; }
+  @media (max-width: 560px) { .options { grid-template-columns: 1fr; } }
+  .option { display: flex; gap: 10px; padding: 12px 14px; cursor: pointer; align-items: flex-start; }
+  .option input { margin-top: 3px; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
+  .option b { display: block; font-weight: 600; }
+  .option small { color: var(--muted); font-size: 13px; line-height: 1.35; display: block; }
+
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+  #empty { color: var(--muted); padding: 20px; text-align: center; }
+  .job { margin-bottom: 10px; overflow: hidden; }
+  .job-head { padding: 14px 16px; display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
+  .job-name { font-weight: 600; overflow-wrap: anywhere; flex: 1 1 240px; min-width: 0; }
+  .tags { display: flex; gap: 6px; }
+  .tag { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+  .job-status { flex-basis: 100%; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
+  .job.error .job-status { color: var(--danger); }
+  .bar { flex-basis: 100%; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+  .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+  .bar.indeterminate i { width: 30%; animation: slide 1.4s ease-in-out infinite; }
+  @keyframes slide { from { margin-left: -30%; } to { margin-left: 100%; } }
+  @media (prefers-reduced-motion: reduce) { .bar.indeterminate i { animation: none; width: 100%; opacity: .4; } }
+  .actions { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 4px; }
+  .actions .spacer { flex: 1; }
+  .actions label { font-size: 13px; color: var(--muted); margin-left: 6px; }
+  button, a.btn {
+    font: inherit; font-size: 13px; padding: 5px 11px; border-radius: 7px; border: 1px solid var(--line);
+    background: transparent; color: var(--ink); cursor: pointer; text-decoration: none; white-space: nowrap;
+  }
+  button:hover, a.btn:hover { border-color: var(--accent); color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.primary:hover { color: var(--accent-ink); filter: brightness(1.08); }
+  button.quiet { border-color: transparent; color: var(--muted); }
+  button.quiet:hover { color: var(--danger); border-color: transparent; }
+
+  .transcript { border-top: 1px solid var(--line); padding: 6px 16px 16px; max-height: 60vh; overflow-y: auto; }
+  .turn { margin-top: 14px; }
+  .turn-head { font-size: 13px; font-weight: 600; margin-bottom: 2px; }
+  .turn-head time { font-weight: 400; color: var(--muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
+  .turn p { margin: 0 0 10px; max-width: 68ch; }
+  .turn p:last-child { margin-bottom: 0; }
+  footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
+  footer h2 { margin-top: 24px; }
+  footer p { margin: 0 0 8px; }
+  .snippet { position: relative; }
+  .snippet pre { margin: 0; padding: 14px 16px; overflow-x: auto; color: var(--ink);
+    font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .snippet button { position: absolute; top: 8px; right: 8px; background: var(--card); }
+  code { font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; background: var(--accent-soft);
+    padding: 1px 5px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Transcriber</h1>
+    <span><span id="user"></span><span id="health">Connecting…</span></span>
+  </header>
+
+  <div id="drop" class="card" tabindex="0" role="button" aria-label="Choose audio or video files to transcribe">
+    <strong>Drop audio or video files here</strong>
+    <span>or click to choose. Anything ffmpeg can read: mp3, m4a, wav, mp4, mov, mkv, webm, ogg, flac…</span>
+    <input id="file" type="file" multiple hidden>
+  </div>
+
+  <div class="options">
+    <label class="option card">
+      <input id="opt-diarize" type="checkbox" checked>
+      <span><b>Identify speakers</b><small>Label who is speaking (Speaker 1, Speaker 2…).</small></span>
+    </label>
+    <label class="option card">
+      <input id="opt-cleanup" type="checkbox">
+      <span><b>Clean up text</b><small>A local language model removes “um”s and false starts and splits the text into paragraphs. Slower.</small></span>
+    </label>
+  </div>
+
+  <h2>Transcripts</h2>
+  <div id="jobs"></div>
+  <div id="empty" class="card">Nothing yet. Files you upload will appear here.</div>
+
+  <footer>
+    <p>Everything runs on this Mac. <span id="privacy">Transcripts are only visible from the browser that uploaded them,</span>
+    are kept in memory, and disappear when the server restarts.</p>
+    <h2>API</h2>
+    <p>The same pipeline is available as an OpenAI Whisper-compatible endpoint. <code>diarize</code> and
+    <code>cleanup</code> are optional; <code>response_format</code> can be <code>json</code>, <code>text</code>,
+    <code>srt</code>, <code>vtt</code>, <code>verbose_json</code> or <code>diarized_json</code>.</p>
+    <div class="snippet card">
+      <pre id="curl"></pre>
+      <button id="curl-copy">Copy</button>
+    </div>
+  </footer>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+};
+const clock = (sec) => {
+  sec = Math.max(0, Math.floor(sec));
+  const h = Math.floor(sec / 3600), m = Math.floor(sec / 60) % 60, s = String(sec % 60).padStart(2, "0");
+  return h ? `${h}:${String(m).padStart(2, "0")}:${s}` : `${m}:${s}`;
+};
+
+// Remember the option checkboxes between visits.
+for (const id of ["opt-diarize", "opt-cleanup"]) {
+  const box = $(id);
+  try { const saved = localStorage.getItem(id); if (saved !== null) box.checked = saved === "1"; } catch {}
+  box.addEventListener("change", () => { try { localStorage.setItem(id, box.checked ? "1" : "0"); } catch {} });
+}
+
+const rows = new Map();     // job id -> row state
+const uploads = new Map();  // local id -> {name, loaded, total, error, diarize, cleanup}
+let uploadSeq = 0;
+
+function makeRow(id) {
+  const row = { id, open: false, loaded: false };
+  row.name = el("div", { className: "job-name" });
+  row.tags = el("div", { className: "tags" });
+  row.status = el("div", { className: "job-status" });
+  row.barFill = el("i");
+  row.bar = el("div", { className: "bar" }, row.barFill);
+  row.actions = el("div", { className: "actions" });
+  row.transcript = el("div", { className: "transcript", hidden: true });
+  row.root = el("div", { className: "job card" },
+    el("div", { className: "job-head" }, row.name, row.tags, row.status, row.bar, row.actions),
+    row.transcript);
+  return row;
+}
+
+function setCommon(row, name, diarize, cleanup) {
+  row.name.textContent = name;
+  if (!row.tags.childElementCount) {
+    if (diarize) row.tags.append(el("span", { className: "tag", textContent: "Speakers" }));
+    if (cleanup) row.tags.append(el("span", { className: "tag", textContent: "Cleaned up" }));
+  }
+}
+
+function setBar(row, progress, visible) {
+  row.bar.hidden = !visible;
+  row.bar.classList.toggle("indeterminate", progress == null);
+  row.barFill.style.width = progress == null ? "" : `${Math.round(progress * 100)}%`;
+}
+
+function updateJob(row, job) {
+  setCommon(row, job.filename, job.diarize, job.cleanup);
+  row.root.classList.toggle("error", job.status === "error");
+  const active = job.status === "queued" || job.status === "processing";
+  setBar(row, job.status === "queued" ? 0 : job.progress, active);
+
+  if (job.status === "error") row.status.textContent = `Failed: ${job.error}`;
+  else if (job.status === "done")
+    row.status.textContent = `${clock(job.duration)} of audio · transcribed in ${clock(job.elapsed)}`;
+  else if (job.status === "queued")
+    row.status.textContent = job.queue_position
+      ? `Waiting in queue: number ${job.queue_position} in line` : "Starting…";
+  else {
+    const pct = job.progress != null && job.status === "processing" ? ` ${Math.round(job.progress * 100)}%` : "…";
+    row.status.textContent = job.stage + pct + (job.elapsed ? ` · ${clock(job.elapsed)}` : "");
+  }
+
+  if (row.state === job.status) return;
+  row.state = job.status;
+  row.actions.replaceChildren();
+  if (job.status === "done") {
+    row.viewBtn = el("button", { className: "primary", textContent: "View", onclick: () => toggle(row) });
+    row.actions.append(row.viewBtn,
+      el("button", { textContent: "Copy", onclick: (e) => copy(row, e.target) }),
+      el("label", { textContent: "Download" }));
+    for (const fmt of ["txt", "md", "srt", "vtt", "json"])
+      row.actions.append(el("a", { className: "btn", textContent: fmt.toUpperCase(),
+        href: `/api/jobs/${job.id}/download?format=${fmt}`, download: "" }));
+  }
+  if (!active) {
+    row.actions.append(el("span", { className: "spacer" }),
+      el("button", { className: "quiet", textContent: "Remove", onclick: () => remove(row) }));
+  }
+}
+
+async function loadTranscript(row) {
+  if (row.loaded) return row.result;
+  const res = await fetch(`/api/jobs/${row.id}`);
+  if (!res.ok) throw new Error("Transcript is no longer available");
+  row.result = (await res.json()).result;
+  const speakers = row.result.speakers;
+  row.transcript.replaceChildren(...row.result.turns.map((turn) => {
+    const node = el("div", { className: "turn" });
+    if (turn.speaker) {
+      const head = el("div", { className: "turn-head", textContent: turn.speaker },
+        el("time", { textContent: clock(turn.start) }));
+      head.style.color = `var(--s${speakers.indexOf(turn.speaker) % 6 + 1})`;
+      node.append(head);
+    }
+    for (const para of turn.text.split(/\n\n+/)) node.append(el("p", { textContent: para }));
+    return node;
+  }));
+  if (!row.result.turns.length) row.transcript.append(el("p", { textContent: "No speech was detected in this file." }));
+  row.loaded = true;
+  return row.result;
+}
+
+async function toggle(row) {
+  row.open = !row.open;
+  if (row.open) await loadTranscript(row);
+  row.transcript.hidden = !row.open;
+  row.viewBtn.textContent = row.open ? "Hide" : "View";
+}
+
+async function copy(row, button) {
+  const result = await loadTranscript(row);
+  const text = result.turns.map((t) => (t.speaker ? `${t.speaker}: ` : "") + t.text).join("\n\n");
+  await navigator.clipboard.writeText(text);
+  button.textContent = "Copied";
+  setTimeout(() => (button.textContent = "Copy"), 1500);
+}
+
+async function remove(row) {
+  if (uploads.has(row.id)) uploads.delete(row.id);
+  else await fetch(`/api/jobs/${row.id}`, { method: "DELETE" });
+  refresh();
+}
+
+function render(jobs) {
+  const list = $("jobs");
+  const wanted = [];
+  for (const [id, up] of [...uploads].reverse()) {
+    const row = rows.get(id) ?? makeRow(id);
+    rows.set(id, row);
+    setCommon(row, up.name, up.diarize, up.cleanup);
+    row.root.classList.toggle("error", !!up.error);
+    setBar(row, up.total ? up.loaded / up.total : null, !up.error);
+    row.status.textContent = up.error ? `Upload failed: ${up.error}`
+      : `Uploading ${up.total ? Math.round(100 * up.loaded / up.total) : 0}%`;
+    if (up.error && !row.actions.childElementCount)
+      row.actions.append(el("span", { className: "spacer" }),
+        el("button", { className: "quiet", textContent: "Remove", onclick: () => remove(row) }));
+    wanted.push(row);
+  }
+  for (const job of jobs) {
+    const row = rows.get(job.id) ?? makeRow(job.id);
+    rows.set(job.id, row);
+    updateJob(row, job);
+    wanted.push(row);
+  }
+  const keep = new Set(wanted);
+  for (const [id, row] of rows) if (!keep.has(row)) { row.root.remove(); rows.delete(id); }
+  wanted.forEach((row, i) => { if (list.children[i] !== row.root) list.insertBefore(row.root, list.children[i] ?? null); });
+  $("empty").hidden = wanted.length > 0;
+}
+
+let timer = null, lastJobs = [];
+async function refresh() {
+  clearTimeout(timer);
+  let delay = 5000;
+  try {
+    const data = await (await fetch("/api/jobs")).json();
+    lastJobs = data.jobs;
+    $("user").textContent = data.user ?? "";
+    $("privacy").textContent = data.user
+      ? `Transcripts are only visible to you (${data.user}),`
+      : "Transcripts are only visible from the browser that uploaded them,";
+    if (lastJobs.some((j) => j.status === "queued" || j.status === "processing")) delay = 1000;
+  } catch { /* server restarting; keep showing what we have */ }
+  render(lastJobs);
+  timer = setTimeout(refresh, delay);
+}
+
+function upload(file) {
+  const id = `upload-${++uploadSeq}`;
+  const state = { name: file.name, loaded: 0, total: file.size, error: null,
+    diarize: $("opt-diarize").checked, cleanup: $("opt-cleanup").checked };
+  uploads.set(id, state);
+  const form = new FormData();
+  form.append("diarize", state.diarize);
+  form.append("cleanup", state.cleanup);
+  form.append("file", file, file.name);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/jobs");
+  xhr.upload.onprogress = (e) => { state.loaded = e.loaded; state.total = e.total; render(lastJobs); };
+  xhr.onload = () => {
+    if (xhr.status < 300) uploads.delete(id);
+    else { try { state.error = JSON.parse(xhr.responseText).error.message; } catch { state.error = `HTTP ${xhr.status}`; } }
+    refresh();
+  };
+  xhr.onerror = () => { state.error = "could not reach the server"; render(lastJobs); };
+  xhr.send(form);
+  render(lastJobs);
+}
+
+const drop = $("drop"), input = $("file");
+drop.addEventListener("click", () => input.click());
+drop.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+input.addEventListener("change", () => { [...input.files].forEach(upload); input.value = ""; });
+// Accept drops anywhere on the page, so a near miss doesn't navigate away to the file.
+addEventListener("dragover", (e) => { e.preventDefault(); drop.classList.add("over"); });
+addEventListener("dragleave", (e) => { if (!e.relatedTarget) drop.classList.remove("over"); });
+addEventListener("drop", (e) => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  [...e.dataTransfer.files].forEach(upload);
+});
+
+async function health() {
+  const node = $("health");
+  try {
+    const data = await (await fetch("/health")).json();
+    node.className = data.status;
+    node.textContent = { ok: "Ready", loading: "Loading speech model…", error: data.error }[data.status];
+    if (data.status === "loading") setTimeout(health, 2000);
+  } catch {
+    node.className = "error";
+    node.textContent = "Server unreachable";
+    setTimeout(health, 5000);
+  }
+}
+
+$("curl").textContent = `curl ${location.origin}/v1/audio/transcriptions \\
+  -F file=@meeting.m4a \\
+  -F diarize=true \\
+  -F cleanup=true \\
+  -F response_format=text`;
+$("curl-copy").addEventListener("click", async (e) => {
+  await navigator.clipboard.writeText($("curl").textContent);
+  e.target.textContent = "Copied";
+  setTimeout(() => (e.target.textContent = "Copy"), 1500);
+});
+
+health();
+refresh();
+</script>
+</body>
+</html>

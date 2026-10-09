@@ -1,0 +1,17 @@
+[project]
+name = "transcriber"
+version = "0.1.0"
+description = "Local transcription + speaker diarization server with a Whisper-compatible API and a web UI"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "ezzizzle" }]
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "parakeet-mlx>=0.5,<1",  # speech-to-text
+    "senko>=0.1.0",          # speaker diarization
+    "mlx-lm>=0.30",          # local LLM for the optional cleanup pass
+]
+
+[tool.uv]
+package = false

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "transcriber",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "-m", "transcriber"],
+      "port": 8000
+    }
+  ]
+}
