@@ -36,6 +36,7 @@ class PipelineError(Exception):
 class Options:
     diarize: bool = False
     cleanup: bool = False
+    summary: bool = False
     language: str | None = None
 
 
@@ -68,6 +69,7 @@ class Job:
             "error": self.error,
             "diarize": self.options.diarize,
             "cleanup": self.options.cleanup,
+            "summarize": self.options.summary,
             "created": self.created,
             "elapsed": round((self.finished or time.time()) - self.started, 1) if self.started else None,
             "duration": self.result["duration"] if self.result else None,
@@ -214,6 +216,10 @@ class Pipeline:
             for turn in turns:
                 del turn["sentences"]
 
+            summary = None
+            if options.summary and turns:
+                summary = self._summarize(turns, options.diarize, report)
+
             return {
                 "duration": round(duration, 3),
                 "language": options.language or "unknown",
@@ -221,6 +227,8 @@ class Pipeline:
                 "diarized": options.diarize,
                 "cleaned": cleaned,
                 "cleanup_model": self.config.cleanup_model if cleaned else None,
+                # {"key_points": [...], "action_items": [...]}; None if not requested or unusable.
+                "summary": summary,
                 "speakers": sorted({t["speaker"] for t in turns if t["speaker"]}, key=lambda s: int(s.split()[-1])),
                 "turns": turns,
                 "segments": segments,
@@ -291,10 +299,20 @@ class Pipeline:
         result = self._diarizer.diarize(str(wav), generate_colors=False)
         return list(result["merged_segments"]) if result else []
 
-    def _cleanup(self, turns: list[dict], report) -> list[dict]:
+    def _load_llm(self, report) -> cleanup.Cleaner:
         if self._cleaner is None:
-            report("Loading cleanup model")
+            report("Loading language model")
             self._cleaner = cleanup.Cleaner(self.config.cleanup_model)
+        return self._cleaner
+
+    def _summarize(self, turns: list[dict], diarized: bool, report) -> dict | None:
+        llm = self._load_llm(report)
+        report("Summarizing", 0.0)
+        blocks = [f"{t['speaker']}: {t['text']}" if diarized else t["text"] for t in turns]
+        return llm.summarize(blocks, diarized, lambda fraction: report("Summarizing", fraction))
+
+    def _cleanup(self, turns: list[dict], report) -> list[dict]:
+        self._load_llm(report)
 
         report("Cleaning up text", 0.0)
         total = sum(len(t["text"].split()) for t in turns) or 1

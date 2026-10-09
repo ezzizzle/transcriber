@@ -6,10 +6,12 @@ Standard library only (http.server); see multipart.py for upload parsing.
 import json
 import re
 import secrets
+import socket
 import sys
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
 from . import formats, multipart
@@ -22,11 +24,15 @@ SESSION_COOKIE = "transcriber_session"
 USER_HEADER = "X-Forwarded-User"
 
 # Model ids advertised on /v1/models. Clients that can't send extra form
-# fields can switch diarization/cleanup on by picking a model name instead.
-MODEL_IDS = ["parakeet", "parakeet-diarize", "parakeet-clean", "parakeet-diarize-clean", "whisper-1"]
+# fields can switch options on by picking a model name instead: any name
+# containing "diariz", "clean" or "summar" turns that option on.
+MODEL_IDS = [
+    "parakeet", "parakeet-diarize", "parakeet-clean", "parakeet-diarize-clean",
+    "parakeet-diarize-summary", "parakeet-diarize-clean-summary", "whisper-1",
+]  # fmt: skip
 
 DOWNLOADS = {
-    "txt": ("text/plain; charset=utf-8", lambda r, name: formats.to_text(r) + "\n"),
+    "txt": ("text/plain; charset=utf-8", lambda r, name: formats.to_text_with_summary(r) + "\n"),
     "md": ("text/markdown; charset=utf-8", lambda r, name: formats.to_markdown(r, name)),
     "srt": ("application/x-subrip; charset=utf-8", lambda r, name: formats.to_srt(r)),
     "vtt": ("text/vtt; charset=utf-8", lambda r, name: formats.to_vtt(r)),
@@ -227,6 +233,7 @@ class Handler(BaseHTTPRequestHandler):
             diarize=parse_bool(field("diarize"), self.config.default_diarize or "diariz" in model)
             or response_format == "diarized_json",
             cleanup=parse_bool(field("cleanup"), self.config.default_cleanup or "clean" in model),
+            summary=parse_bool(field("summary"), self.config.default_summary or "summar" in model),
             language=field("language") or None,
         )
         granularities = fields.get("timestamp_granularities[]", []) + fields.get("timestamp_granularities", [])
@@ -241,7 +248,8 @@ class Handler(BaseHTTPRequestHandler):
 
         result = job.result
         if response_format == "json":
-            self._json(200, {"text": formats.to_text(result)})
+            summary = {"summary": result["summary"]} if result["summary"] else {}
+            self._json(200, {"text": formats.to_text(result), **summary})
         elif response_format == "verbose_json":
             payload = formats.to_verbose_json(
                 result,
@@ -252,7 +260,7 @@ class Handler(BaseHTTPRequestHandler):
         elif response_format == "diarized_json":
             self._json(200, formats.to_diarized_json(result))
         elif response_format == "text":
-            self._send(200, formats.to_text(result) + "\n", "text/plain; charset=utf-8")
+            self._send(200, formats.to_text_with_summary(result) + "\n", "text/plain; charset=utf-8")
         else:
             content_type, render = DOWNLOADS[response_format]
             self._send(200, render(result, job.filename), content_type)
@@ -263,6 +271,7 @@ class Handler(BaseHTTPRequestHandler):
         options = Options(
             diarize=parse_bool(fields.get("diarize", [None])[-1]),
             cleanup=parse_bool(fields.get("cleanup", [None])[-1]),
+            summary=parse_bool(fields.get("summary", [None])[-1]),
         )
         job = self.engine.submit(upload.filename, upload.path, options, owner=self._session())
         self._json(202, self.engine.summary(job))
@@ -275,7 +284,7 @@ class Handler(BaseHTTPRequestHandler):
         job = self._job_or_404(job_id)
         payload = self.engine.summary(job)
         if job.result:
-            payload["result"] = {key: job.result[key] for key in ("diarized", "cleaned", "speakers", "turns")}
+            payload["result"] = {key: job.result[key] for key in ("diarized", "cleaned", "speakers", "turns", "summary")}
         self._json(200, payload)
 
     def get_download(self, job_id):
@@ -301,5 +310,16 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
 
     def __init__(self, config: Config, engine: Engine):
-        super().__init__((config.host, config.port), Handler)
         self.config, self.engine = config, engine
+        if ":" in config.host:  # e.g. "::" for every interface, IPv4 and IPv6
+            self.address_family = socket.AF_INET6
+        super().__init__((config.host, config.port), Handler)
+
+    def server_bind(self):
+        # Deliberately not HTTPServer.server_bind: it resolves the bind address
+        # with getfqdn(), which can stall startup for a long time where DNS is
+        # restricted, and nothing here uses the name.
+        if self.address_family == socket.AF_INET6:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]

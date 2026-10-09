@@ -112,5 +112,32 @@ class CleanupHelpersTest(unittest.TestCase):
         self.assertEqual(cleanup.normalize_paragraphs("<think>x</think>One.\nTwo.\n\n\nThree."), "One.\n\nTwo.\n\nThree.")
 
 
+class SummaryTest(unittest.TestCase):
+    def test_parse_summary(self):
+        raw = "<think>hm</think>## Key points\n- **Release** moved to March.\n* Budget is over.\n\n**Action items**\n1. Speaker 2: tell the team (no deadline specified)\nSpeaker 3: send it (Thursday)\n- None\n"
+        self.assertEqual(
+            cleanup.parse_summary(raw),
+            {"key_points": ["Release moved to March.", "Budget is over."], "action_items": ["Speaker 2: tell the team", "Speaker 3: send it (Thursday)"]},
+        )
+        self.assertEqual(cleanup.parse_summary("## Key points\n- A\n## Action items\n- None"),
+                         {"key_points": ["A"], "action_items": []})
+        self.assertIsNone(cleanup.parse_summary("Sure! Here is a summary of the meeting."))
+
+    def test_split_for_summary(self):
+        self.assertEqual(cleanup.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
+        self.assertEqual(cleanup.split_for_summary(["a b c d e"], max_words=2), ["a b", "c d", "e"])
+
+    def test_rendering(self):
+        result = {**FormatsTest.result, "summary": {"key_points": ["Said bye."], "action_items": []}}
+        text = formats.to_text_with_summary(result)
+        self.assertTrue(text.startswith("Speaker 1: Bye.\n\n"))
+        self.assertIn("KEY POINTS\n- Said bye.\n\nACTION ITEMS\n- None", text)
+        self.assertIn("## Action items\n\n- None", formats.to_markdown(result))
+        self.assertEqual(formats.to_text(result), "Speaker 1: Bye.")  # JSON `text` stays transcript-only
+        self.assertEqual(formats.to_verbose_json(result)["summary"]["key_points"], ["Said bye."])
+        self.assertEqual(formats.to_text_with_summary(FormatsTest.result), "Speaker 1: Bye.")
+        self.assertNotIn("summary", formats.to_verbose_json(FormatsTest.result))
+
+
 if __name__ == "__main__":
     unittest.main()

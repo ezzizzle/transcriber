@@ -8,6 +8,7 @@ A result is a plain dict:
       "segments": [{"id", "start", "end", "text", "speaker"|None, "confidence"}],
       "words":    [{"word", "start", "end", "speaker"|None}],
       "turns":    [{"speaker"|None, "start", "end", "text"}],
+      "summary":  {"key_points": [str], "action_items": [str]} | None,
     }
 
 Segments and words always carry the raw transcription (they have timestamps).
@@ -41,12 +42,41 @@ def to_text(result: dict) -> str:
     return "\n\n".join(f"{t['speaker']}: {t['text']}" for t in result["turns"])
 
 
+SUMMARY_NOTE = "Machine-generated summary. Check it against the transcript before relying on it."
+
+
+def summary_sections(result: dict) -> list[tuple[str, list[str]]]:
+    """[(heading, bullets)] for the summary, or [] when there isn't one."""
+    summary = result.get("summary")
+    if not summary:
+        return []
+    return [
+        ("Key points", summary["key_points"] or ["None"]),
+        ("Action items", summary["action_items"] or ["None"]),
+    ]
+
+
+def to_text_with_summary(result: dict) -> str:
+    """The transcript, then key points and action items if they were requested."""
+    out = [to_text(result)]
+    for heading, bullets in summary_sections(result):
+        out.append(f"{heading.upper()}\n" + "\n".join(f"- {b}" for b in bullets))
+    if len(out) > 1:
+        out.insert(1, "-" * 40)
+        out.append(f"({SUMMARY_NOTE})")
+    return "\n\n".join(out)
+
+
 def to_markdown(result: dict, title: str = "Transcript") -> str:
     out = [f"# {title}", ""]
     for t in result["turns"]:
         if result["diarized"]:
             out += [f"**{t['speaker']}** · {clock(t['start'])}", ""]
         out += [t["text"], ""]
+    for heading, bullets in summary_sections(result):
+        out += [f"## {heading}", "", *(f"- {b}" for b in bullets), ""]
+    if result.get("summary"):
+        out += [f"*{SUMMARY_NOTE}*", ""]
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -74,6 +104,8 @@ def to_verbose_json(result: dict, words: bool = False, segments: bool = True) ->
         "duration": result["duration"],
         "text": to_text(result),
     }
+    if result.get("summary"):
+        out["summary"] = result["summary"]
     if segments:
         out["segments"] = [
             {
@@ -104,6 +136,7 @@ def to_diarized_json(result: dict) -> dict:
         "task": "transcribe",
         "duration": result["duration"],
         "text": to_text(result),
+        **({"summary": result["summary"]} if result.get("summary") else {}),
         "segments": [
             {
                 "type": "transcript.text.segment",

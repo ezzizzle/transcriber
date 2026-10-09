@@ -40,6 +40,7 @@ class Config:
     # Defaults for the Whisper-compatible endpoint when the request doesn't say.
     default_diarize: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_DIARIZE", "false")))
     default_cleanup: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_CLEANUP", "false")))
+    default_summary: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_SUMMARY", "false")))
 
     max_upload_mb: int = field(default_factory=lambda: int(_env("MAX_UPLOAD_MB", "4096")))
     # Long audio is transcribed in overlapping windows of this many seconds.

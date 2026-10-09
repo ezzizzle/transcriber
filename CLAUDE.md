@@ -34,7 +34,8 @@ disk on every request, so UI edits only need a page reload.
   spawned worker processes, one per parallel job, each with its own models.
   They talk over a pipe: `("stage", name, progress)`, then `("done", result)`
   or `("error", message, is_user_error)`.
-- `cleanup.py` is the LLM pass; `formats.py` renders a result dict (shape
+- `cleanup.py` holds both LLM passes (clean-up and the key points / action
+  items summary); `formats.py` renders a result dict (shape
   documented at the top of that file) into text, Markdown, SRT, VTT and JSON.
 
 ## Things that are easy to break
@@ -55,6 +56,13 @@ disk on every request, so UI edits only need a page reload.
 - **Clean-up must fail safe.** `cleanup.plausible()` discards LLM output that
   is much shorter or longer than its input and keeps the original passage.
   Keep that guard when changing the prompt or the model.
+- **The summary never goes into JSON `text`.** It is appended to plain-text and
+  Markdown output only (`formats.to_text_with_summary`); JSON formats carry it
+  as a separate `summary` field so `text` stays the transcript.
+- **Summary prompts are sensitive.** Small wording changes have made the model
+  drop bullet markers, invent owners or borrow deadlines. After editing
+  `SUMMARY_PROMPT`, re-run a diarized and an undiarized transcript and read the
+  action items. `parse_summary` is deliberately lenient about format.
 - **Uploads stream to disk.** Never read a request body into memory; files can
   be gigabytes.
 - **Render user content with `textContent`** in the UI (filenames, transcripts),

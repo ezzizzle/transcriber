@@ -39,8 +39,8 @@
   #drop strong { display: block; font-size: 16px; margin-bottom: 2px; }
   #drop span { color: var(--muted); font-size: 13px; }
 
-  .options { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0 28px; }
-  @media (max-width: 560px) { .options { grid-template-columns: 1fr; } }
+  .options { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 12px 0 28px; }
+  @media (max-width: 700px) { .options { grid-template-columns: 1fr; } }
   .option { display: flex; gap: 10px; padding: 12px 14px; cursor: pointer; align-items: flex-start; }
   .option input { margin-top: 3px; accent-color: var(--accent); width: 16px; height: 16px; flex: none; }
   .option b { display: block; font-weight: 600; }
@@ -79,6 +79,11 @@
   .turn-head time { font-weight: 400; color: var(--muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
   .turn p { margin: 0 0 10px; max-width: 68ch; }
   .turn p:last-child { margin-bottom: 0; }
+  .summary { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); }
+  .summary h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
+  .summary ul { margin: 0; padding-left: 20px; max-width: 68ch; }
+  .summary li { margin-bottom: 4px; }
+  .summary small { display: block; margin-top: 12px; color: var(--muted); font-size: 12px; }
   footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
   footer h2 { margin-top: 24px; }
   footer p { margin: 0 0 8px; }
@@ -112,6 +117,10 @@
       <input id="opt-cleanup" type="checkbox">
       <span><b>Clean up text</b><small>A local language model removes “um”s and false starts and splits the text into paragraphs. Slower.</small></span>
     </label>
+    <label class="option card">
+      <input id="opt-summary" type="checkbox">
+      <span><b>Key points and action items</b><small>A local language model adds a short summary and a to-do list below the transcript.</small></span>
+    </label>
   </div>
 
   <h2>Transcripts</h2>
@@ -122,8 +131,8 @@
     <p>Everything runs on this Mac. <span id="privacy">Transcripts are only visible from the browser that uploaded them,</span>
     are kept in memory, and disappear when the server restarts.</p>
     <h2>API</h2>
-    <p>The same pipeline is available as an OpenAI Whisper-compatible endpoint. <code>diarize</code> and
-    <code>cleanup</code> are optional; <code>response_format</code> can be <code>json</code>, <code>text</code>,
+    <p>The same pipeline is available as an OpenAI Whisper-compatible endpoint. <code>diarize</code>,
+    <code>cleanup</code> and <code>summary</code> are optional; <code>response_format</code> can be <code>json</code>, <code>text</code>,
     <code>srt</code>, <code>vtt</code>, <code>verbose_json</code> or <code>diarized_json</code>.</p>
     <div class="snippet card">
       <pre id="curl"></pre>
@@ -146,7 +155,7 @@ const clock = (sec) => {
 };
 
 // Remember the option checkboxes between visits.
-for (const id of ["opt-diarize", "opt-cleanup"]) {
+for (const id of ["opt-diarize", "opt-cleanup", "opt-summary"]) {
   const box = $(id);
   try { const saved = localStorage.getItem(id); if (saved !== null) box.checked = saved === "1"; } catch {}
   box.addEventListener("change", () => { try { localStorage.setItem(id, box.checked ? "1" : "0"); } catch {} });
@@ -171,11 +180,12 @@ function makeRow(id) {
   return row;
 }
 
-function setCommon(row, name, diarize, cleanup) {
+function setCommon(row, name, diarize, cleanup, summarize) {
   row.name.textContent = name;
   if (!row.tags.childElementCount) {
     if (diarize) row.tags.append(el("span", { className: "tag", textContent: "Speakers" }));
     if (cleanup) row.tags.append(el("span", { className: "tag", textContent: "Cleaned up" }));
+    if (summarize) row.tags.append(el("span", { className: "tag", textContent: "Summary" }));
   }
 }
 
@@ -186,7 +196,8 @@ function setBar(row, progress, visible) {
 }
 
 function updateJob(row, job) {
-  setCommon(row, job.filename, job.diarize, job.cleanup);
+  setCommon(row, job.filename, job.diarize, job.cleanup, job.summarize);
+  row.summarize = job.summarize;
   row.root.classList.toggle("error", job.status === "error");
   const active = job.status === "queued" || job.status === "processing";
   setBar(row, job.status === "queued" ? 0 : job.progress, active);
@@ -220,6 +231,13 @@ function updateJob(row, job) {
   }
 }
 
+const SUMMARY_NOTE = "Machine-generated summary. Check it against the transcript before relying on it.";
+function summarySections(result) {
+  if (!result.summary) return [];
+  const orNone = (items) => (items.length ? items : ["None"]);
+  return [["Key points", orNone(result.summary.key_points)], ["Action items", orNone(result.summary.action_items)]];
+}
+
 async function loadTranscript(row) {
   if (row.loaded) return row.result;
   const res = await fetch(`/api/jobs/${row.id}`);
@@ -238,6 +256,17 @@ async function loadTranscript(row) {
     return node;
   }));
   if (!row.result.turns.length) row.transcript.append(el("p", { textContent: "No speech was detected in this file." }));
+  const sections = summarySections(row.result);
+  if (sections.length) {
+    const box = el("div", { className: "summary" });
+    for (const [heading, bullets] of sections)
+      box.append(el("h3", { textContent: heading }), el("ul", {}, ...bullets.map((b) => el("li", { textContent: b }))));
+    box.append(el("small", { textContent: SUMMARY_NOTE }));
+    row.transcript.append(box);
+  } else if (row.summarize && row.result.turns.length) {
+    row.transcript.append(el("div", { className: "summary" },
+      el("small", { textContent: "The summary could not be generated for this transcript." })));
+  }
   row.loaded = true;
   return row.result;
 }
@@ -251,7 +280,10 @@ async function toggle(row) {
 
 async function copy(row, button) {
   const result = await loadTranscript(row);
-  const text = result.turns.map((t) => (t.speaker ? `${t.speaker}: ` : "") + t.text).join("\n\n");
+  const blocks = result.turns.map((t) => (t.speaker ? `${t.speaker}: ` : "") + t.text);
+  for (const [heading, bullets] of summarySections(result))
+    blocks.push(`${heading.toUpperCase()}\n` + bullets.map((b) => `- ${b}`).join("\n"));
+  const text = blocks.join("\n\n");
   await navigator.clipboard.writeText(text);
   button.textContent = "Copied";
   setTimeout(() => (button.textContent = "Copy"), 1500);
@@ -269,7 +301,7 @@ function render(jobs) {
   for (const [id, up] of [...uploads].reverse()) {
     const row = rows.get(id) ?? makeRow(id);
     rows.set(id, row);
-    setCommon(row, up.name, up.diarize, up.cleanup);
+    setCommon(row, up.name, up.diarize, up.cleanup, up.summary);
     row.root.classList.toggle("error", !!up.error);
     setBar(row, up.total ? up.loaded / up.total : null, !up.error);
     row.status.textContent = up.error ? `Upload failed: ${up.error}`
@@ -311,11 +343,12 @@ async function refresh() {
 function upload(file) {
   const id = `upload-${++uploadSeq}`;
   const state = { name: file.name, loaded: 0, total: file.size, error: null,
-    diarize: $("opt-diarize").checked, cleanup: $("opt-cleanup").checked };
+    diarize: $("opt-diarize").checked, cleanup: $("opt-cleanup").checked, summary: $("opt-summary").checked };
   uploads.set(id, state);
   const form = new FormData();
   form.append("diarize", state.diarize);
   form.append("cleanup", state.cleanup);
+  form.append("summary", state.summary);
   form.append("file", file, file.name);
   const xhr = new XMLHttpRequest();
   xhr.open("POST", "/api/jobs");
@@ -361,6 +394,7 @@ $("curl").textContent = `curl ${location.origin}/v1/audio/transcriptions \\
   -F file=@meeting.m4a \\
   -F diarize=true \\
   -F cleanup=true \\
+  -F summary=true \\
   -F response_format=text`;
 $("curl-copy").addEventListener("click", async (e) => {
   await navigator.clipboard.writeText($("curl").textContent);

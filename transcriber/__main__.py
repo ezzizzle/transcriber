@@ -1,10 +1,23 @@
 import argparse
 import shutil
+import socket
 import sys
 
 from .config import Config
 from .pipeline import Engine
 from .server import Server
+
+
+def _reachable_host(host: str) -> str:
+    """A host other machines can put in a URL: wildcard binds become this Mac's LAN address."""
+    if host in {"0.0.0.0", "::"}:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("192.0.2.1", 9))  # picks the outbound interface; sends nothing
+                return probe.getsockname()[0]
+        except OSError:
+            return "localhost"
+    return f"[{host}]" if ":" in host else host
 
 
 def main():
@@ -21,9 +34,10 @@ def main():
     engine = Engine(config)
     server = Server(config, engine)
     engine.start()
-    print(f"Web UI:               http://{config.host}:{config.port}/")
+    base = f"http://{_reachable_host(config.host)}:{config.port}"
+    print(f"Web UI:               {base}/")
     print(f"Parallel jobs:        {config.max_parallel} (set TRANSCRIBER_MAX_PARALLEL to change)")
-    print(f"Whisper-compatible:   http://{config.host}:{config.port}/v1/audio/transcriptions", flush=True)
+    print(f"Whisper-compatible:   {base}/v1/audio/transcriptions", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

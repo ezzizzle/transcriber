@@ -2,7 +2,7 @@
 
 Local speech-to-text with speaker diarization for Apple Silicon Macs. Upload any
 audio or video file ffmpeg can read and get back a transcript, optionally with
-speaker labels and an LLM clean-up pass. Nothing leaves the machine.
+speaker labels, an LLM clean-up pass, and a summary of key points and action items. Nothing leaves the machine.
 
 This project was developed by Claude, not me.
 
@@ -12,7 +12,7 @@ This project was developed by Claude, not me.
 ```
 any media file ──ffmpeg──▶ 16 kHz mono WAV ─┬─▶ parakeet-mlx   (text + timestamps)
                                             └─▶ senko          (who spoke when, optional)
-                              merge by time overlap ──▶ local LLM clean-up (optional)
+                              merge by time overlap ──▶ local LLM: clean-up, summary (optional)
 ```
 
 ## Run it
@@ -35,6 +35,20 @@ The server binds to localhost only. To serve other machines on your network:
 
 ```bash
 uv run python -m transcriber --host 0.0.0.0 --port 8000
+```
+
+Use `--host ::` instead to listen on IPv6 as well as IPv4. If other machines
+can't connect (the request hangs rather than being refused), the macOS firewall
+on the server is the usual cause: uv's Python is not signed by a known
+developer, so incoming connections are blocked until it is allowed. Check and
+allow it with:
+
+```bash
+/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate
+```
+
+```bash
+sudo /usr/libexec/ApplicationFirewall/socketfilterfw --add "$(readlink -f .venv/bin/python)" --unblockapp "$(readlink -f .venv/bin/python)"
 ```
 
 There is no login of its own. See [Privacy and users](#privacy-and-users) before exposing it.
@@ -107,6 +121,7 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
   -F file=@meeting.m4a \
   -F diarize=true \
   -F cleanup=true \
+  -F summary=true \
   -F response_format=text
 ```
 
@@ -116,13 +131,14 @@ curl http://127.0.0.1:8000/v1/audio/transcriptions \
 | `response_format` | `json` (default), `text`, `srt`, `vtt`, `verbose_json`, `diarized_json` | `diarized_json` is OpenAI's diarization response shape and implies `diarize=true` |
 | `diarize` | `true` / `false` | extension; adds `Speaker N:` to the text and a `speaker` key to segments/words |
 | `cleanup` | `true` / `false` | extension; removes disfluencies and adds paragraphs |
+| `summary` | `true` / `false` | extension; adds key points and action items (see below) |
 | `timestamp_granularities[]` | `segment`, `word` | with `verbose_json` |
 | `model` | anything | see below |
 | `language` | e.g. `en` | echoed back; the model detects the language itself |
 
 Clients that can't send extra form fields can select options through the model
-name instead: `parakeet-diarize`, `parakeet-clean`, `parakeet-diarize-clean`
-(any name containing `diariz` / `clean`). Any other name, including `whisper-1`,
+name instead: `parakeet-diarize`, `parakeet-clean`, `parakeet-diarize-clean-summary`
+and so on (any name containing `diariz`, `clean` or `summar`). Any other name, including `whisper-1`,
 uses the server defaults. `prompt` and `temperature` are accepted and ignored.
 
 With the OpenAI SDK:
@@ -141,6 +157,22 @@ Segments, words and subtitles always carry the raw transcription, because they
 are tied to timestamps. Clean-up applies to the text (`text`, TXT, Markdown, and
 the turns shown in the UI).
 
+### Key points and action items
+
+With `summary=true` the same local model that does clean-up reads the finished
+transcript and writes two short lists. They are appended below the transcript
+in `text` responses and in the TXT and Markdown downloads, and returned as a
+separate field in every JSON format (where `text` stays transcript-only):
+
+```json
+{"text": "...", "summary": {"key_points": ["..."], "action_items": ["Speaker 3: Send the breakdown (Thursday)"]}}
+```
+
+Action items name an owner only when speakers are identified, as "Speaker N";
+without diarization they are listed as "Unassigned". Transcripts longer than
+about 50 minutes of speech are summarized in parts and then merged. Treat the
+result as a draft: see [Known limits](#known-limits).
+
 ## Configuration
 
 Environment variables, all optional:
@@ -149,8 +181,8 @@ Environment variables, all optional:
 |---|---|---|
 | `TRANSCRIBER_HOST` / `TRANSCRIBER_PORT` | `127.0.0.1` / `8000` | |
 | `TRANSCRIBER_ASR_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | any parakeet-mlx model |
-| `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | any mlx-lm chat model |
-| `TRANSCRIBER_DEFAULT_DIARIZE` / `TRANSCRIBER_DEFAULT_CLEANUP` | `false` | API defaults when the request doesn't say |
+| `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | any mlx-lm chat model; used for clean-up and summaries |
+| `TRANSCRIBER_DEFAULT_DIARIZE` / `_CLEANUP` / `_SUMMARY` | `false` | API defaults when the request doesn't say |
 | `TRANSCRIBER_MAX_PARALLEL` | RAM ÷ 16 GB, max 4 | jobs processed at once |
 | `TRANSCRIBER_IDLE_UNLOAD_SECONDS` | `600` | idle time before extra workers exit |
 | `TRANSCRIBER_CHUNK_SECONDS` | `120` | transcription window; lower it to reduce peak memory |
@@ -193,6 +225,10 @@ Measured on an M4 Pro with a 51-minute recording, one job at a time:
 | + speaker identification | 46 s | 6.3 GB |
 | + clean-up | about 4 min | 8.1 GB |
 
+Summarizing adds seconds rather than minutes (about 30 s for an hour of
+speech), but reading a long transcript in one pass raised the language model's
+own peak from 2.7 GB to 4.6 GB.
+
 A worker settles at about 4 GB once all three models are loaded, and peaked at
 up to 8.8 GB in testing. Budget that much per parallel slot. Four simultaneous
 8.5-minute jobs with every option on took about 90 s each, against 31 s for one
@@ -223,6 +259,10 @@ The only Python dependencies are `parakeet-mlx`, `senko` and `mlx-lm`.
 - The clean-up model is small and instructed to change as little as possible; if
   its output looks wrong for a passage (much shorter or longer than the
   original), the original text is kept for that passage.
+- Summaries come from a small model and contain mistakes. In testing the key
+  points were dependable, while action items sometimes had the wrong owner or
+  deadline, missed a task, or listed something nobody committed to. This got
+  worse on transcripts long enough to be summarized in parts.
 - Queued or running jobs can't be cancelled.
 
 ## License
