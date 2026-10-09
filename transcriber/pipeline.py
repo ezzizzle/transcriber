@@ -5,9 +5,13 @@
                                      merge by time overlap --> local LLM cleanup [optional]
 
 Jobs run in worker processes, up to `max_parallel` at once; the rest wait in a
-FIFO queue. Each worker owns its own copy of the models: MLX state is
-per-thread and not safe to share, and a process boundary also means a crash
+FIFO queue. Each worker owns its own speech and diarization models: MLX state
+is per-thread and not safe to share, and a process boundary also means a crash
 on one file can't take the server or anyone else's job down with it.
+
+The language model is the exception. It is the largest model by far, so one
+extra process holds a single copy and the workers take turns with it, relayed
+through the server process (worker -> Engine -> SharedLLM -> llm_main).
 """
 
 import multiprocessing
@@ -164,14 +168,17 @@ def build_turns(segments: list[dict]) -> list[dict]:
 
 
 class Pipeline:
-    """Owns the models and runs one file at a time. Lives in a worker process."""
+    """Owns the speech models and runs one file at a time. Lives in a worker process.
 
-    def __init__(self, config: Config):
+    `ask(system, user, max_tokens) -> str` is how it reaches the shared language model.
+    """
+
+    def __init__(self, config: Config, ask):
         self.config = config
+        self._editor = cleanup.Editor(ask)
         self._diar_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diarize")
         self._asr = None
         self._diarizer = None
-        self._cleaner: cleanup.Cleaner | None = None
 
     def load_asr(self):
         if self._asr is None:
@@ -299,21 +306,12 @@ class Pipeline:
         result = self._diarizer.diarize(str(wav), generate_colors=False)
         return list(result["merged_segments"]) if result else []
 
-    def _load_llm(self, report) -> cleanup.Cleaner:
-        if self._cleaner is None:
-            report("Loading language model")
-            self._cleaner = cleanup.Cleaner(self.config.cleanup_model)
-        return self._cleaner
-
     def _summarize(self, turns: list[dict], diarized: bool, report) -> dict | None:
-        llm = self._load_llm(report)
         report("Summarizing", 0.0)
         blocks = [f"{t['speaker']}: {t['text']}" if diarized else t["text"] for t in turns]
-        return llm.summarize(blocks, diarized, lambda fraction: report("Summarizing", fraction))
+        return self._editor.summarize(blocks, diarized, lambda fraction: report("Summarizing", fraction))
 
     def _cleanup(self, turns: list[dict], report) -> list[dict]:
-        self._load_llm(report)
-
         report("Cleaning up text", 0.0)
         total = sum(len(t["text"].split()) for t in turns) or 1
         seen = 0
@@ -321,7 +319,7 @@ class Pipeline:
         for turn in turns:
             parts = []
             for chunk in cleanup.chunk_sentences(turn["sentences"]):
-                parts.append(self._cleaner.clean(chunk))
+                parts.append(self._editor.clean(chunk))
                 seen += len(chunk.split())
                 report("Cleaning up text", seen / total)
             text = "\n\n".join(p for p in parts if p)
@@ -340,9 +338,18 @@ def worker_main(conn, config: Config, preload: bool):
 
     Receives (job_id, path, options) over `conn`; replies with any number of
     ("stage", name, progress) messages, then ("done", result) or
-    ("error", message, is_user_error).
+    ("error", message, is_user_error). To use the language model it sends
+    ("llm", system, user, max_tokens) and waits for ("llm", text_or_None, error).
     """
-    pipeline = Pipeline(config)
+
+    def ask(system: str, user: str, max_tokens: int) -> str:
+        conn.send(("llm", system, user, max_tokens))
+        _, text, error = conn.recv()
+        if error:
+            raise RuntimeError(error)
+        return text
+
+    pipeline = Pipeline(config, ask)
     try:
         if preload:
             error = None
@@ -380,6 +387,50 @@ def worker_main(conn, config: Config, preload: bool):
 # ---------------------------------------------------------------------- engine
 
 
+class SharedLLM:
+    """The single language-model process, started on first use and then kept."""
+
+    def __init__(self, mp_context, model_id: str):
+        self._mp, self._model_id = mp_context, model_id
+        self._lock = threading.Lock()  # one request at a time; jobs interleave chunk by chunk
+        self._proc = self._conn = None
+
+    def ask(self, job: Job, system: str, user: str, max_tokens: int) -> str:
+        with self._lock:
+            try:
+                if self._proc is None or not self._proc.is_alive():
+                    self._start(job)
+                self._conn.send((system, user, max_tokens))
+                status, value = self._conn.recv()
+            except (EOFError, OSError) as exc:
+                self._stop()
+                raise RuntimeError("The language model process crashed.") from exc
+        if status == "error":
+            raise RuntimeError(value)
+        return value
+
+    def _start(self, job: Job):
+        shown = job.stage, job.progress
+        job.stage, job.progress = "Loading language model", None  # may include the download
+        parent_conn, child_conn = self._mp.Pipe()
+        self._proc = self._mp.Process(
+            target=cleanup.llm_main, args=(child_conn, self._model_id), name="transcriber-llm", daemon=True
+        )
+        self._proc.start()
+        child_conn.close()
+        self._conn = parent_conn
+        error = self._conn.recv()[1]
+        job.stage, job.progress = shown
+        if error:
+            self._stop()
+            raise RuntimeError(error)
+
+    def _stop(self):
+        if self._proc is not None:
+            self._proc.kill()
+        self._proc = self._conn = None
+
+
 class Engine:
     """Job queue plus a pool of worker processes. Lives in the server process."""
 
@@ -391,6 +442,7 @@ class Engine:
         self._idle: set[int] = set()
         self._running = 0
         self._mp = multiprocessing.get_context("spawn")
+        self._llm = SharedLLM(self._mp, config.cleanup_model)
         self.ready = threading.Event()
         self.load_error: str | None = None
         config.work_dir.mkdir(parents=True, exist_ok=True)
@@ -494,6 +546,11 @@ class Engine:
                     kind, *payload = conn.recv()
                     if kind == "stage":
                         job.stage, job.progress = payload
+                    elif kind == "llm":
+                        try:
+                            conn.send(("llm", self._llm.ask(job, *payload), None))
+                        except RuntimeError as exc:
+                            conn.send(("llm", None, str(exc)))
                     elif kind == "done":
                         job.result = payload[0]
                         job.status, job.stage, job.progress = "done", "Done", None

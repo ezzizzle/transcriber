@@ -28,8 +28,8 @@ uv run python -m transcriber
 ```
 
 Then open http://127.0.0.1:8000/. Models download from Hugging Face on first use
-(speech model at startup, ~2.5 GB; the clean-up model the first time clean-up is
-requested, ~2.5 GB) and are cached in `~/.cache/huggingface`.
+(speech model at startup, ~2.5 GB; the language model the first time clean-up or
+a summary is requested, ~5.6 GB) and are cached in `~/.cache/huggingface`.
 
 The server binds to localhost only. To serve other machines on your network:
 
@@ -73,7 +73,7 @@ hf download mlx-community/parakeet-tdt-0.6b-v3
 ```
 
 ```bash
-hf download mlx-community/Qwen3-4B-Instruct-2507-4bit
+hf download mlx-community/Qwen3.5-9B-MLX-4bit
 ```
 
   Then start the server with `HF_HUB_OFFLINE=1` so it never tries to reach
@@ -107,9 +107,12 @@ Up to `TRANSCRIBER_MAX_PARALLEL` jobs are processed at once; the rest wait in a
 first-come-first-served queue, and the web UI shows each waiting job's place in
 line. API requests share the same queue and simply block until their turn.
 
-Each parallel job runs in its own worker process with its own copy of the
-models, so every extra slot costs memory (see [Resource use](#resource-use)).
-The default is one slot per 16 GB of RAM, at most 4. The first worker stays
+Each parallel job runs in its own worker process with its own speech and
+diarization models, so every extra slot costs memory (see
+[Resource use](#resource-use)). The language model is loaded once, in a process
+of its own, and shared: transcription and speaker identification run fully in
+parallel, while clean-up and summary requests from different jobs take turns.
+The default is 1 slot on a 16 GB Mac, 2 on 24 GB, 3 on 32 GB, at most 4. The first worker stays
 loaded; extra workers exit after 10 idle minutes to give their memory back.
 All workers share one GPU, so parallel jobs each run slower: this is about
 nobody waiting behind a long file, not about total throughput.
@@ -181,9 +184,9 @@ Environment variables, all optional:
 |---|---|---|
 | `TRANSCRIBER_HOST` / `TRANSCRIBER_PORT` | `127.0.0.1` / `8000` | |
 | `TRANSCRIBER_ASR_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | any parakeet-mlx model |
-| `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3-4B-Instruct-2507-4bit` | any mlx-lm chat model; used for clean-up and summaries |
+| `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3.5-9B-MLX-4bit` | any mlx-lm chat model; used for clean-up and summaries |
 | `TRANSCRIBER_DEFAULT_DIARIZE` / `_CLEANUP` / `_SUMMARY` | `false` | API defaults when the request doesn't say |
-| `TRANSCRIBER_MAX_PARALLEL` | RAM ÷ 16 GB, max 4 | jobs processed at once |
+| `TRANSCRIBER_MAX_PARALLEL` | 1 at 16 GB, 2 at 24 GB, max 4 | jobs processed at once |
 | `TRANSCRIBER_IDLE_UNLOAD_SECONDS` | `600` | idle time before extra workers exit |
 | `TRANSCRIBER_CHUNK_SECONDS` | `120` | transcription window; lower it to reduce peak memory |
 | `TRANSCRIBER_MAX_UPLOAD_MB` | `4096` | |
@@ -217,22 +220,29 @@ Also worth knowing:
 
 ## Resource use
 
-Measured on an M4 Pro with a 51-minute recording, one job at a time:
+Measured on an M4 Pro, limited to two parallel jobs, with the default models:
 
-| | Time | Peak memory |
+| Process | At rest | Peak |
 |---|---|---|
-| Transcription only | 39 s | 5.5 GB |
-| + speaker identification | 46 s | 6.3 GB |
-| + clean-up | about 4 min | 8.1 GB |
+| Each worker (speech + speaker models) | about 2 GB | 6.5–6.9 GB while transcribing |
+| Language model (one, shared) | 5.5 GB | 8.6 GB summarizing an hour-long transcript |
 
-Summarizing adds seconds rather than minutes (about 30 s for an hour of
-speech), but reading a long transcript in one pass raised the language model's
-own peak from 2.7 GB to 4.6 GB.
+A job's worker and the language model don't peak together, so two jobs
+overlapping at their worst came to about 19 GB, and about 10 GB once idle. That
+is what makes two parallel jobs workable on a 24 GB Mac. Lowering
+`TRANSCRIBER_CHUNK_SECONDS` to 60 reduces the workers' transcription peak.
 
-A worker settles at about 4 GB once all three models are loaded, and peaked at
-up to 8.8 GB in testing. Budget that much per parallel slot. Four simultaneous
-8.5-minute jobs with every option on took about 90 s each, against 31 s for one
-alone.
+Timings from the same runs:
+
+| Two jobs at once | Options | Wall time for both |
+|---|---|---|
+| 51-minute recordings | speakers + summary | 2.5 min |
+| 8.5-minute recordings | speakers + clean-up + summary | 80 s |
+
+Clean-up is the slow step, since it rewrites the whole transcript; transcription
+alone handled a 51-minute file in 39 s. A smaller language model
+(`mlx-community/Qwen3-4B-Instruct-2507-4bit`, 2.1 GB) is faster and lighter but
+gave weaker summaries.
 
 ## Layout
 
@@ -256,7 +266,7 @@ The only Python dependencies are `parakeet-mlx`, `senko` and `mlx-lm`.
   most. A very short reply right at a speaker change ("Got it.") can land on the
   wrong side.
 - Diarization can over-split one voice into several speakers on some audio.
-- The clean-up model is small and instructed to change as little as possible; if
+- The language model is small and instructed to change as little as possible; if
   its output looks wrong for a passage (much shorter or longer than the
   original), the original text is kept for that passage.
 - Summaries come from a small model and contain mistakes. In testing the key

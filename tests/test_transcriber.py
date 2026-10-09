@@ -123,6 +123,13 @@ class SummaryTest(unittest.TestCase):
                          {"key_points": ["A"], "action_items": []})
         self.assertIsNone(cleanup.parse_summary("Sure! Here is a summary of the meeting."))
 
+    def test_undiarized_owner(self):
+        answer = "## Key points\n- A\n## Action items\n- Speaker: email legal (today)\n- Priya: fix the bug (by Wednesday)"
+        ask = lambda system, user, max_tokens: answer
+        self.assertEqual(cleanup.Editor(ask).summarize(["x"], False)["action_items"],
+                         ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
+        self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["action_items"][0], "Speaker: email legal (today)")
+
     def test_split_for_summary(self):
         self.assertEqual(cleanup.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
         self.assertEqual(cleanup.split_for_summary(["a b c d e"], max_words=2), ["a b", "c d", "e"])

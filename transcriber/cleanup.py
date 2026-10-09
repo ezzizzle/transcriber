@@ -44,10 +44,14 @@ starting with "- ".
 
 ## Action items
 - One bullet per task that someone said they will do ("I will...", "I can...") or \
-was asked to do, in the form: OWNER: TASK
+was asked to do, in the form: OWNER: TASK (DEADLINE)
 
 Rules for action items:
 - OWNER_RULE
+- DEADLINE is when that particular task is due, in the words the speaker used for it \
+("today", "by Thursday", "the 20th"). Do not add a month, year or weekday that was \
+not spoken, and do not borrow a deadline from a different task. Leave the \
+parentheses out when no deadline was given.
 - A decision is a key point, not an action item, unless someone has to do something.
 - If there are no action items, write "- None"."""
 
@@ -156,48 +160,28 @@ def parse_summary(markdown: str) -> dict | None:
     return sections if sections["key_points"] or sections["action_items"] else None
 
 
-class Cleaner:
-    """The local LLM. Must be created and used on a single thread (MLX streams are thread-local)."""
+def unassign_unknown_speaker(item: str) -> str:
+    """Without diarization nobody is "Speaker 2"; the model sometimes says so anyway."""
+    return re.sub(r"^(?:the )?speaker(?: \d+)?\s*:", "Unassigned:", item, flags=re.I)
 
-    def __init__(self, model_id: str):
-        from mlx_lm import load
 
-        self.model_id = model_id
-        self.model, self.tokenizer = load(model_id)
+class Editor:
+    """The clean-up and summary passes, on top of any `ask(system, user, max_tokens) -> str`.
+
+    Everything here is plain text handling, so it runs wherever the transcript
+    is; only `ask` reaches the model (see LocalModel and llm_main).
+    """
+
+    def __init__(self, ask):
+        self._ask = ask
 
     def clean(self, text: str) -> str:
         if len(text.split()) < _MIN_LLM_WORDS:
             return strip_fillers(text)
 
-        from mlx_lm import generate
-        from mlx_lm.sample_utils import make_sampler
-
-        prompt = self.tokenizer.apply_chat_template(
-            [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": f"<transcript>\n{text}\n</transcript>"},
-            ],
-            add_generation_prompt=True,
-        )
-        raw = generate(
-            self.model,
-            self.tokenizer,
-            prompt=prompt,
-            max_tokens=len(text.split()) * 3 + 200,
-            sampler=make_sampler(temp=0.0),
-        )
+        raw = self._ask(SYSTEM_PROMPT, f"<transcript>\n{text}\n</transcript>", len(text.split()) * 3 + 200)
         cleaned = normalize_paragraphs(raw)
         return cleaned if plausible(text, cleaned) else text
-
-    def _ask(self, system: str, user: str, max_tokens: int) -> str:
-        from mlx_lm import generate
-        from mlx_lm.sample_utils import make_sampler
-
-        prompt = self.tokenizer.apply_chat_template(
-            [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            add_generation_prompt=True,
-        )
-        return generate(self.model, self.tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=make_sampler(temp=0.0))
 
     def summarize(self, blocks: list[str], diarized: bool, progress=lambda fraction: None) -> dict | None:
         """Key points and action items for a transcript given as speaker turns.
@@ -213,7 +197,63 @@ class Cleaner:
         for i, part in enumerate(parts):
             answers.append(self._ask(system, f"<transcript>\n{part}\n</transcript>", 900))
             progress((i + 1) / (len(parts) + (len(parts) > 1)))
-        if len(answers) == 1:
-            return parse_summary(answers[0])
-        numbered = "\n\n".join(f"Part {i} of {len(answers)}:\n{a.strip()}" for i, a in enumerate(answers, 1))
-        return parse_summary(self._ask(MERGE_PROMPT, f"<parts>\n{numbered}\n</parts>", 1200))
+        if len(answers) > 1:
+            numbered = "\n\n".join(f"Part {i} of {len(answers)}:\n{a.strip()}" for i, a in enumerate(answers, 1))
+            answers = [self._ask(MERGE_PROMPT, f"<parts>\n{numbered}\n</parts>", 1200)]
+        summary = parse_summary(answers[0])
+        if summary and not diarized:
+            summary["action_items"] = [unassign_unknown_speaker(item) for item in summary["action_items"]]
+        return summary
+
+
+class LocalModel:
+    """The LLM itself. Must be created and used on a single thread (MLX streams are thread-local)."""
+
+    def __init__(self, model_id: str):
+        from mlx_lm import load
+
+        self.model, self.tokenizer = load(model_id)
+
+    def ask(self, system: str, user: str, max_tokens: int) -> str:
+        import mlx.core as mx
+        from mlx_lm import generate
+        from mlx_lm.sample_utils import make_sampler
+
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        try:
+            # Reasoning models would otherwise spend the token budget thinking out loud.
+            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)
+        except TypeError:
+            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
+        try:
+            return generate(self.model, self.tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=make_sampler(temp=0.0))
+        finally:
+            if len(prompt) > 2000:  # a long transcript leaves gigabytes of buffers cached
+                mx.clear_cache()
+
+
+def llm_main(conn, model_id: str):
+    """Entry point of the one process that holds the language model.
+
+    The model is several GB, so it is loaded once and shared by every worker
+    rather than once per parallel job. Receives (system, user, max_tokens);
+    replies ("ok", text) or ("error", message). The first message sent is
+    ("ready", error_or_None).
+    """
+    try:
+        try:
+            print(f"Loading language model {model_id} ...", flush=True)
+            model = LocalModel(model_id)
+            print("Language model ready.", flush=True)
+        except Exception as exc:  # noqa: BLE001 - reported to the job that needed it
+            conn.send(("ready", f"Could not load the language model {model_id}: {exc}"))
+            return
+        conn.send(("ready", None))
+        while True:
+            request = conn.recv()
+            try:
+                conn.send(("ok", model.ask(*request)))
+            except Exception as exc:  # noqa: BLE001 - one bad request must not kill the model
+                conn.send(("error", f"{type(exc).__name__}: {exc}"))
+    except (EOFError, KeyboardInterrupt):
+        pass  # server is shutting down

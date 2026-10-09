@@ -31,15 +31,23 @@ disk on every request, so UI edits only need a page reload.
   never imports a model.
 - `pipeline.py` holds both halves of the job system. `Engine` (parent) owns the
   queue and one thread per worker slot. `Pipeline` and `worker_main` run in
-  spawned worker processes, one per parallel job, each with its own models.
-  They talk over a pipe: `("stage", name, progress)`, then `("done", result)`
-  or `("error", message, is_user_error)`.
+  spawned worker processes, one per parallel job, each with its own speech and
+  diarization models. They talk over a pipe: `("stage", name, progress)`, then
+  `("done", result)` or `("error", message, is_user_error)`.
+- The language model lives in one extra process (`cleanup.llm_main`), shared by
+  all workers to save memory. A worker sends `("llm", system, user, max_tokens)`
+  up its pipe; the parent's `SharedLLM` forwards it under a lock and relays the
+  answer. Prompt building and output checking (`cleanup.Editor`) stay in the
+  worker; only raw `ask` calls cross processes.
 - `cleanup.py` holds both LLM passes (clean-up and the key points / action
   items summary); `formats.py` renders a result dict (shape
   documented at the top of that file) into text, Markdown, SRT, VTT and JSON.
 
 ## Things that are easy to break
 
+- **Do not load the language model in workers.** One copy per job is what made
+  two parallel jobs not fit in 24 GB. Check `footprint` on every child process
+  after changing model loading.
 - **MLX is not shareable across threads.** A model must be loaded and used on
   the same thread. That is why workers are processes and why the parent never
   touches MLX. Diarization (CoreML) is the one thing allowed on a second thread.
