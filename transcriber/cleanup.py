@@ -110,14 +110,36 @@ Output only the sentences: no heading, no dot points, no preamble."""
 # Roughly 50 minutes of speech; comfortably inside the model's context window.
 _SUMMARY_MAX_WORDS = 9000
 
-_FILLER = re.compile(r"\b(?:u+h+m*|u+m+|e+r+m*|a+h+|h+m+)\b[,.…]*\s*", re.I)
+# Filler sounds as whole words. The hyphen guards keep "uh-huh" and "mm-hmm", which mean something.
+_FILLER = r"(?<![\w-])(?:u+h+m*|u+m+|e+r+m*|a+h+|h+m+)(?![\w-])"
 _MIN_LLM_WORDS = 12
 
 
 def strip_fillers(text: str) -> str:
-    """Regex fallback for passages too short to be worth an LLM call."""
-    out = _FILLER.sub("", text).strip()
-    return out[:1].upper() + out[1:] if out else out
+    """Remove "um", "uh", "er", "ah" and "hmm", tidying the punctuation they leave behind.
+
+    Plain pattern matching, no model. It is the whole clean-up for passages too
+    short to be worth a model call, and a final sweep over the model's output,
+    because the model lets some fillers through.
+    """
+
+    def one(paragraph: str) -> str:
+        flags = re.I
+        p = paragraph
+        # A filler that is a whole sentence: "Right. Um. Okay." -> "Right. Okay."
+        p = re.sub(rf"(^|[.?!…]\s+){_FILLER}[.?!…]+\s*", r"\1", p, flags=flags)
+        # At the start of a sentence, the next word takes the capital: "Um, the plan" -> "The plan"
+        p = re.sub(rf"(^|[.?!…]\s+){_FILLER}[,…]*\s+(\w)", lambda m: m.group(1) + m.group(2).upper(), p, flags=flags)
+        # After a joining word the commas go too: "and, uh, nobody" -> "and nobody"
+        p = re.sub(rf"\b(and|but|or|so|because|that|then),\s+{_FILLER},\s+", r"\1 ", p, flags=flags)
+        # At the end of a sentence: "it was, um." -> "it was."
+        p = re.sub(rf",?\s*{_FILLER}(?=\s*[.?!…])", "", p, flags=flags)
+        # Anywhere else, with the comma that follows: "Anyway, um, the plan" -> "Anyway, the plan"
+        p = re.sub(rf"{_FILLER}[,…]*[ \t]*", "", p, flags=flags)
+        p = re.sub(r"[ \t]+([,.?!])", r"\1", p)
+        return re.sub(r"[ \t]{2,}", " ", p).strip()
+
+    return "\n\n".join(filter(None, (one(paragraph) for paragraph in text.split("\n\n"))))
 
 
 def chunk_sentences(sentences: list[str], pauses: list[float] | None = None, max_words: int = 250) -> list[str]:
@@ -249,7 +271,8 @@ class Editor:
             ])  # fmt: skip
             for i, raw in zip(batch, answers):
                 cleaned = normalize_paragraphs(raw)
-                out[i] = cleaned if plausible(texts[i], cleaned) else texts[i]
+                # The model lets some fillers through, and its rejected answers leave them all in.
+                out[i] = strip_fillers(cleaned if plausible(texts[i], cleaned) else texts[i])
                 done += len(texts[i].split())
             progress(done / total)
         return out

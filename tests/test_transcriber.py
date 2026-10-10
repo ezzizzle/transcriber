@@ -115,6 +115,18 @@ class CleanupHelpersTest(unittest.TestCase):
         self.assertEqual(cleanup.strip_fillers("Um, yeah, uh, sure."), "Yeah, sure.")
         self.assertEqual(cleanup.strip_fillers("Umm."), "")
         self.assertEqual(cleanup.strip_fillers("The summer hummed."), "The summer hummed.")
+        for before, after in [
+            ("Anyway, um, the database migration: are we still saying March?", "Anyway, the database migration: are we still saying March?"),
+            ("It started at ten past two, and, uh, nobody noticed.", "It started at ten past two, and nobody noticed."),
+            ("Great. Okay, um, I think that's it. Thanks.", "Great. Okay, I think that's it. Thanks."),
+            ("We fixed it. Um, the other thing is cost.", "We fixed it. The other thing is cost."),
+            ("Right. Um. Okay, next.", "Right. Okay, next."),
+            ("I think it was, uh. Never mind.", "I think it was. Never mind."),
+            ("Uh-huh, mm-hmm, that works.", "Uh-huh, mm-hmm, that works."),  # these mean "yes"
+            ("One, um, two.\n\nUh, three.\n\nUm.", "One, two.\n\nThree."),  # paragraphs survive
+            ("The number is, um, 42?", "The number is, 42?"),
+        ]:
+            self.assertEqual(cleanup.strip_fillers(before), after)
 
     def test_chunking_and_guard(self):
         self.assertEqual(cleanup.chunk_sentences(["a b c", "d e", "f"], max_words=4), ["a b c", "d e f"])
@@ -159,6 +171,14 @@ class ChunkingTest(unittest.TestCase):
         out = cleanup.Editor(ask_many, batch_size=2).clean_many(texts)
         self.assertEqual(calls, [2, 2, 1])  # the short passage never reaches the model
         self.assertEqual(out, [long("one"), "Yeah.", long("two"), long("bad"), long("three"), long("four")])
+
+    def test_fillers_the_model_left_are_swept(self):
+        left_in = "So the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon."
+        rejected = "Um, " + " ".join(["word"] * 20)
+        ask_many = lambda requests: [left_in if "queue" in user else "No." for _, user, _ in requests]
+        out = cleanup.Editor(ask_many).clean_many(["So, um, the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon.", rejected])
+        self.assertEqual(out[0], "So the queue backed up, and nobody noticed until support got a ticket about it that afternoon.")
+        self.assertEqual(out[1], " ".join(["Word"] + ["word"] * 19))  # the model's answer was rejected; the original is still swept
 
 
 class SummaryTest(unittest.TestCase):

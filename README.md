@@ -178,6 +178,11 @@ the speaker paused longest rather than at a fixed word count; that is usually a
 change of subject. Pauses are measured from the audio itself with ffmpeg.
 Within a passage the model chooses the paragraph breaks.
 
+The model lets a share of filler sounds through (about one in ten in testing),
+so its output gets a final pattern-matching sweep that removes any remaining
+"um", "uh", "er", "ah" and "hmm". Phrases such as "you know" and "like" are left
+to the model, since a pattern can't tell when they carry meaning.
+
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
