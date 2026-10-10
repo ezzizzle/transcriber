@@ -203,6 +203,32 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["action_items"][0], "Speaker: email legal (today)")
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["executive_summary"], "They met. Things happened.")
 
+    def test_empty_deadlines_are_dropped(self):
+        def items(*lines):
+            return cleanup.parse_summary("## Action items\n" + "\n".join(f"- {line}" for line in lines))["action_items"]
+
+        self.assertEqual(
+            items(
+                "Speaker 1: Email legal (No deadline specified)",
+                "Speaker 2: Fix the bug (No deadline specified).",
+                "Speaker 3 (Tom): Book the lab (not stated)",
+                "Speaker 1: Renew the certificate (Deadline: none)",
+                "Unassigned: Cover Friday (N/A)",
+                "Speaker 2: Write it up (no deadline) and circulate it",
+            ),
+            [
+                "Speaker 1: Email legal",
+                "Speaker 2: Fix the bug.",
+                "Speaker 3 (Tom): Book the lab",
+                "Speaker 1: Renew the certificate",
+                "Unassigned: Cover Friday",
+                "Speaker 2: Write it up and circulate it",
+            ],
+        )
+        kept = ["Speaker 1: Send it (by Thursday)", "Speaker 2: Ship it (not before Friday)",
+                "Unassigned: Prepare the data (to be decided next week)", "Speaker 3 (Tom): Call them (today)"]
+        self.assertEqual(items(*kept), kept)
+
     def test_split_for_summary(self):
         self.assertEqual(cleanup.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
         self.assertEqual(cleanup.split_for_summary(["a b c d e"], max_words=2), ["a b", "c d", "e"])

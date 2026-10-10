@@ -206,6 +206,23 @@ def split_for_summary(blocks: list[str], max_words: int = _SUMMARY_MAX_WORDS) ->
     return parts
 
 
+# The model is told to leave the brackets out when a task has no deadline, and
+# sometimes fills them with a way of saying so instead: "(No deadline specified)",
+# "(not stated)", "(Deadline: none)", "(N/A)". Real deadlines such as "(not before
+# Friday)" or "(to be decided next week)" don't match and are kept.
+_NO_DEADLINE = re.compile(
+    r"""\s*\(\s*(?:
+        (?:no|none|not|n/?a|unspecified|unknown)
+        (?:\s+(?:deadline|due\s+date|date|time\s?frame|timeline))?
+        (?:\s+(?:was\s+|were\s+)?(?:specified|given|stated|mentioned|said|set|provided|applicable|discussed))?
+      |
+        (?:deadline|due\s+date|due)\s*(?:is|was|:|-)?\s*
+        (?:none|n/?a|unspecified|unknown|not\s+(?:specified|given|stated|mentioned|said|set|provided|discussed))
+    )\s*\.?\s*\)""",
+    re.I | re.X,
+)
+
+
 def parse_summary(markdown: str) -> dict | None:
     """Pull the model's three sections apart; None if it produced none of them.
 
@@ -225,7 +242,8 @@ def parse_summary(markdown: str) -> dict | None:
             item = re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line)
             item = re.sub(r"^(?:OWNER|TASK):\s*", "", item)  # the format line taken literally
             item = re.sub(r"\*\*(.+?)\*\*", r"\1", item)
-            item = re.sub(r"\s*\((?:no|none|not)\b[^)]*\)\s*$", "", item, flags=re.I).strip()  # "(no deadline given)"
+            item = _NO_DEADLINE.sub("", item)
+            item = re.sub(r"\s+([.,;])", r"\1", item).strip()
             if item and item.lower().rstrip(".") != "none":
                 sections[current].append(item)
     if not any(sections.values()):
