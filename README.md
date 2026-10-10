@@ -171,8 +171,10 @@ separate field in every JSON format (where `text` stays transcript-only):
 {"text": "...", "summary": {"key_points": ["..."], "action_items": ["Speaker 3: Send the breakdown (Thursday)"]}}
 ```
 
-Action items name an owner only when speakers are identified, as "Speaker N";
-without diarization they are listed as "Unassigned". Transcripts longer than
+Action items name an owner only when speakers are identified ("Speaker 2", or
+"Speaker 2 (Priya)" when the name is clear from the conversation). Without
+diarization the model cannot tell who said what, so tasks are listed without an
+owner and the summary avoids attributing statements to anyone. Transcripts longer than
 about 50 minutes of speech are summarized in parts and then merged. Treat the
 result as a draft: see [Known limits](#known-limits).
 
@@ -224,13 +226,15 @@ Measured on an M4 Pro, limited to two parallel jobs, with the default models:
 
 | Process | At rest | Peak |
 |---|---|---|
-| Each worker (speech + speaker models) | about 2 GB | 6.5–6.9 GB while transcribing |
+| Each worker (speech + speaker models) | 2–3 GB | 6.5–8.1 GB while transcribing |
 | Language model (one, shared) | 5.5 GB | 8.6 GB summarizing an hour-long transcript |
 
-A job's worker and the language model don't peak together, so two jobs
-overlapping at their worst came to about 19 GB, and about 10 GB once idle. That
-is what makes two parallel jobs workable on a 24 GB Mac. Lowering
-`TRANSCRIBER_CHUNK_SECONDS` to 60 reduces the workers' transcription peak.
+A job's worker and the language model don't peak together, but two workers
+can. Two jobs transcribing at once with the language model loaded therefore
+needs up to about 22 GB at the worst moment, and about 10 GB once idle. On a
+24 GB Mac that leaves little to spare, and no room for a larger language model.
+`TRANSCRIBER_CHUNK_SECONDS` does not help here: workers peaked at 7–8 GB with
+60 and 30 second windows as well.
 
 Timings from the same runs:
 
@@ -241,8 +245,13 @@ Timings from the same runs:
 
 Clean-up is the slow step, since it rewrites the whole transcript; transcription
 alone handled a 51-minute file in 39 s. A smaller language model
-(`mlx-community/Qwen3-4B-Instruct-2507-4bit`, 2.1 GB) is faster and lighter but
-gave weaker summaries.
+(`mlx-community/Qwen3-4B-Instruct-2507-4bit`, 2.1 GB loaded against 5.5 GB) is
+the alternative if speed or memory matters more than accuracy. In testing it
+cleaned up text about twice as fast (44 against 23 words per second) and removed
+fillers at least as well, but its summaries contained factual slips that the
+default model did not make: a cost read as a travel time, a request attributed
+to the wrong person, an action item nobody had agreed to. Select it with
+`TRANSCRIBER_CLEANUP_MODEL`.
 
 ## Layout
 

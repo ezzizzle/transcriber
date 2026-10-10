@@ -68,9 +68,12 @@ disk on every request, so UI edits only need a page reload.
   Markdown output only (`formats.to_text_with_summary`); JSON formats carry it
   as a separate `summary` field so `text` stays the transcript.
 - **Summary prompts are sensitive.** Small wording changes have made the model
-  drop bullet markers, invent owners or borrow deadlines. After editing
-  `SUMMARY_PROMPT`, re-run a diarized and an undiarized transcript and read the
-  action items. `parse_summary` is deliberately lenient about format.
+  drop bullet markers, echo the format line, invent owners or borrow deadlines.
+  After editing `SUMMARY_PROMPT`, re-run a diarized and an undiarized transcript
+  and read the output. `parse_summary` is deliberately lenient about format.
+- **Undiarized summaries must not attribute.** Without speaker labels the model
+  guesses owners from names said in passing and gets them wrong, so
+  `summary_prompt(False)` asks for tasks with no owner. Don't add owners back.
 - **Uploads stream to disk.** Never read a request body into memory; files can
   be gigabytes.
 - **Render user content with `textContent`** in the UI (filenames, transcripts),

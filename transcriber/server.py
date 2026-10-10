@@ -20,6 +20,8 @@ from .pipeline import Engine, Job, Options
 
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "transcriber_session"
+# What senko runs on macOS; it bundles these rather than taking a model name.
+DIARIZATION_MODEL = "senko (pyannote segmentation 3.0 + CAM++)"
 # Set by an authenticating reverse proxy. Trusted as-is: see README, "Privacy".
 USER_HEADER = "X-Forwarded-User"
 
@@ -207,6 +209,7 @@ class Handler(BaseHTTPRequestHandler):
             "status": status,
             "error": engine.load_error,
             "asr_model": self.config.asr_model,
+            "diarization_model": DIARIZATION_MODEL,
             "cleanup_model": self.config.cleanup_model,
             **engine.stats(),
         })  # fmt: skip

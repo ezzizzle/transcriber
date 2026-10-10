@@ -32,51 +32,69 @@ text, or translate.
 - Output only the cleaned passage: no tags, no preamble, no commentary."""
 
 SUMMARY_PROMPT = """\
-You summarize transcripts of meetings and conversations. You receive a transcript \
-inside <transcript> tags. Use only what is stated in it: never invent names, dates, \
-tasks or decisions.
+You write up recordings of meetings and conversations. You receive the transcript of \
+the audio inside <transcript> tags. It was transcribed by machine, so expect filler \
+words, repetition and the occasional misheard word.
 
-Output exactly these two Markdown sections and nothing else. Every item is a line \
-starting with "- ".
+Generate a dot point summary of what was said, then record any action items. Use only \
+what is in the transcript: never guess or add names, numbers, dates or tasks.
+
+Lay the answer out exactly like this, with every point on its own line starting with "- ":
 
 ## Key points
-- 3 to 8 bullets covering the main topics, facts and decisions, in the order discussed.
+- (the dot point summary)
 
 ## Action items
-- One bullet per task that someone said they will do ("I will...", "I can...") or \
-was asked to do, in the form: OWNER: TASK (DEADLINE)
+- ITEM_FORMAT
 
-Rules for action items:
+For the summary:
+- Cover every topic that was discussed, in order, with one point per thing worth \
+knowing. Use as many points as the conversation needs and skip greetings and small talk.
+- Be specific. Include the figures, names, dates, decisions and reasons that were \
+given ("the login bug affects about 4% of Android sessions", not "a bug was discussed").
+- When something was corrected or changed during the conversation, report the final version.
+
+For the action items:
+- List everything someone said they would do or was asked to do, one task per line.
 - OWNER_RULE
-- DEADLINE is when that particular task is due, in the words the speaker used for it \
-("today", "by Thursday", "the 20th"). Do not add a month, year or weekday that was \
-not spoken, and do not borrow a deadline from a different task. Leave the \
-parentheses out when no deadline was given.
-- A decision is a key point, not an action item, unless someone has to do something.
+- DEADLINE is when that task is due, in the speaker's own words ("today", "by \
+Thursday"). Leave the brackets out if no deadline was said for that task.
+- Things that were decided, dropped or only wished for are not action items.
 - If there are no action items, write "- None"."""
 
-# Who owns a task can only be read off speaker labels, which exist only when diarized.
+# Who owns a task can only be read off speaker labels, which exist only when
+# diarized. Without them the model guesses from names in passing ("Thanks, Tom")
+# and gets it wrong, so it is told not to attribute anything at all.
+_ITEM_FORMATS = {True: "OWNER: TASK (DEADLINE)", False: "TASK (DEADLINE)"}
 _OWNER_RULES = {
     True: 'OWNER is the label of the speaker who will do the task, exactly as it appears at the '
-    'start of their lines (such as "Speaker 1"). If a task was raised but nobody took it, '
-    'OWNER is "Unassigned".',
-    False: 'This transcript does not say who is speaking. OWNER is a person\'s name only if that '
-    'name is spoken in the transcript as the one doing the task; otherwise OWNER is '
-    '"Unassigned". Never write "Speaker" or a job title as OWNER.',
+    'start of their lines, followed by their name in brackets if the transcript makes it clear '
+    '(such as "Speaker 2 (Priya)"). If a task was raised but nobody took it, OWNER is '
+    '"Unassigned".',
+    False: 'This transcript does not show who is speaking, so you cannot tell who said what. Do '
+    'not say who will do a task, and in the summary do not attribute statements or plans to '
+    'anyone by name: write what was said and what needs doing ("the pricing copy will be '
+    'drafted by the end of the week").',
 }
 
+
+def summary_prompt(diarized: bool) -> str:
+    return SUMMARY_PROMPT.replace("ITEM_FORMAT", _ITEM_FORMATS[diarized]).replace("OWNER_RULE", _OWNER_RULES[diarized])
+
+
 MERGE_PROMPT = """\
-You receive summaries of consecutive parts of one long transcript, inside <parts> tags. \
+You receive summaries of consecutive parts of one long recording, inside <parts> tags. \
 Merge them into a single summary. Use only what the part summaries say.
 
-Output exactly these two Markdown sections and nothing else:
+Lay the answer out exactly like this, with every point on its own line starting with "- ":
 
 ## Key points
-- 3 to 10 bullets covering the most important topics, facts and decisions, in order.
+- (every key point from the parts, in order, keeping the figures, names and dates; \
+merge points that say the same thing)
 
 ## Action items
-- Every distinct action item from the parts, copied unchanged, each on a line \
-starting with "- ". Drop exact duplicates. If there are none, write "- None"."""
+- (every distinct action item from the parts, copied unchanged; drop exact \
+duplicates; if there are none, write "- None")"""
 
 # Roughly 50 minutes of speech; comfortably inside the model's context window.
 _SUMMARY_MAX_WORDS = 9000
@@ -153,6 +171,7 @@ def parse_summary(markdown: str) -> dict | None:
             continue
         if current and line:  # the model sometimes forgets the bullet marker
             item = re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line)
+            item = re.sub(r"^(?:OWNER|TASK):\s*", "", item)  # the format line taken literally
             item = re.sub(r"\*\*(.+?)\*\*", r"\1", item)
             item = re.sub(r"\s*\((?:no|none|not)\b[^)]*\)\s*$", "", item, flags=re.I).strip()  # "(no deadline given)"
             if item and item.lower().rstrip(".") != "none":
@@ -191,7 +210,7 @@ class Editor:
         Returns {"key_points": [...], "action_items": [...]}, or None if the
         model's answer could not be read.
         """
-        system = SUMMARY_PROMPT.replace("OWNER_RULE", _OWNER_RULES[diarized])
+        system = summary_prompt(diarized)
         parts = split_for_summary(blocks)
         answers = []
         for i, part in enumerate(parts):

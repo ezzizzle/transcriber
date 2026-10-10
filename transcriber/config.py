@@ -20,7 +20,7 @@ def _default_parallel() -> int:
     """Jobs that fit in RAM: 1 on a 16 GB Mac, 2 on 24 GB, 3 on 32 GB, capped at 4.
 
     Sets aside 8 GB for the shared language model and macOS, then allows one
-    worker per 7 GB (a worker peaked at 6.3 GB transcribing and diarizing).
+    worker per 7 GB (a worker peaks at 6.5 to 8 GB transcribing and diarizing).
     """
     try:
         ram_gb = os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") / 2**30

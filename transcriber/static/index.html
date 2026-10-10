@@ -87,6 +87,10 @@
   footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
   footer h2 { margin-top: 24px; }
   footer p { margin: 0 0 8px; }
+  #models { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; margin: 0; }
+  #models dd { margin: 0; color: var(--ink); overflow-wrap: anywhere;
+    font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  @media (max-width: 560px) { #models { grid-template-columns: 1fr; } #models dd { margin-bottom: 6px; } }
   .snippet { position: relative; }
   .snippet pre { margin: 0; padding: 14px 16px; overflow-x: auto; color: var(--ink);
     font: 12.5px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -130,6 +134,12 @@
   <footer>
     <p>Everything runs on this Mac. <span id="privacy">Transcripts are only visible from the browser that uploaded them,</span>
     are kept in memory, and disappear when the server restarts.</p>
+    <h2>Models</h2>
+    <dl id="models">
+      <dt>Transcription</dt><dd id="model-asr">…</dd>
+      <dt>Speaker identification</dt><dd id="model-diarization">…</dd>
+      <dt>Clean-up, key points and action items</dt><dd id="model-llm">…</dd>
+    </dl>
     <h2>API</h2>
     <p>The same pipeline is available as an OpenAI Whisper-compatible endpoint. <code>diarize</code>,
     <code>cleanup</code> and <code>summary</code> are optional; <code>response_format</code> can be <code>json</code>, <code>text</code>,
@@ -382,6 +392,9 @@ async function health() {
     const data = await (await fetch("/health")).json();
     node.className = data.status;
     node.textContent = { ok: "Ready", loading: "Loading speech model…", error: data.error }[data.status];
+    $("model-asr").textContent = data.asr_model;
+    $("model-diarization").textContent = data.diarization_model;
+    $("model-llm").textContent = data.cleanup_model;
     if (data.status === "loading") setTimeout(health, 2000);
   } catch {
     node.className = "error";
