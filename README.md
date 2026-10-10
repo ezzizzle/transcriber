@@ -166,6 +166,18 @@ Segments, words and subtitles always carry the raw transcription, because they
 are tied to timestamps. Clean-up applies to the text (`text`, TXT, Markdown, and
 the turns shown in the UI).
 
+### Clean-up
+
+Clean-up rewrites the whole transcript, so it is the slowest step. To keep the
+model accurate, each speaker's turn is handled in passages of up to about 250
+words, and a few passages are generated at once (1.6 to 2.1 times faster than
+one after another in testing).
+
+A cut between passages becomes a paragraph break, so long turns are cut where
+the speaker paused longest rather than at a fixed word count; that is usually a
+change of subject. Pauses are measured from the audio itself with ffmpeg.
+Within a passage the model chooses the paragraph breaks.
+
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
@@ -194,6 +206,7 @@ Environment variables, all optional:
 | `TRANSCRIBER_ASR_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | any parakeet-mlx model |
 | `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3.5-9B-MLX-4bit` | any mlx-lm chat model; used for clean-up and summaries |
 | `TRANSCRIBER_DEFAULT_DIARIZE` / `_CLEANUP` / `_SUMMARY` | `false` | API defaults when the request doesn't say |
+| `TRANSCRIBER_CLEANUP_BATCH` | `4` | clean-up passages sent through the language model at once; `1` disables batching |
 | `TRANSCRIBER_MAX_PARALLEL` | 1 at 16 GB, 2 at 24 GB, max 4 | jobs processed at once |
 | `TRANSCRIBER_IDLE_UNLOAD_SECONDS` | `600` | idle time before extra workers exit |
 | `TRANSCRIBER_CHUNK_SECONDS` | `120` | transcription window; lower it to reduce peak memory |
@@ -288,6 +301,9 @@ The only Python dependencies are `parakeet-mlx`, `senko` and `mlx-lm`.
   points were dependable, while action items sometimes had the wrong owner or
   deadline, missed a task, or listed something nobody committed to. This got
   worse on transcripts long enough to be summarized in parts.
+- In a long stretch by one speaker, clean-up starts a new paragraph at least
+  every 250 words or so. The break is placed at a pause, but a speaker who
+  changes subject without pausing will get a break slightly off the topic change.
 - Queued or running jobs can't be cancelled.
 
 ## License

@@ -49,6 +49,9 @@ class Config:
     max_upload_mb: int = field(default_factory=lambda: int(_env("MAX_UPLOAD_MB", "4096")))
     # Long audio is transcribed in overlapping windows of this many seconds.
     chunk_seconds: float = field(default_factory=lambda: float(_env("CHUNK_SECONDS", "120")))
+    # Clean-up passages generated per model call. About twice as fast as one at
+    # a time; larger batches gain little more and cost memory.
+    cleanup_batch: int = field(default_factory=lambda: max(1, int(_env("CLEANUP_BATCH", "4"))))
     # Jobs processed at once. Each parallel job has its own worker process and
     # its own speech models (about 6 GB at peak); the language model is shared.
     max_parallel: int = field(default_factory=lambda: max(1, int(_env("MAX_PARALLEL", str(_default_parallel())))))

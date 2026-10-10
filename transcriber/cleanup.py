@@ -109,17 +109,32 @@ def strip_fillers(text: str) -> str:
     return out[:1].upper() + out[1:] if out else out
 
 
-def chunk_sentences(sentences: list[str], max_words: int = 250) -> list[str]:
-    chunks, current, count = [], [], 0
-    for sentence in sentences:
-        n = len(sentence.split())
-        if current and count + n > max_words:
-            chunks.append(" ".join(current))
-            current, count = [], 0
-        current.append(sentence)
-        count += n
-    if current:
-        chunks.append(" ".join(current))
+def chunk_sentences(sentences: list[str], pauses: list[float] | None = None, max_words: int = 250) -> list[str]:
+    """Split a run of sentences into chunks of at most `max_words` for the LLM.
+
+    `pauses[i]` is the silence before sentence i, in seconds. A chunk boundary
+    becomes a paragraph break, so when a cut is needed it goes where the
+    speaker paused longest in the second half of the chunk, which is usually a
+    change of subject. Without pauses the chunk is simply filled.
+    """
+    pauses = pauses or [0.0] * len(sentences)
+    counts = [len(sentence.split()) for sentence in sentences]
+    chunks, start = [], 0
+    while start < len(sentences):
+        end, words = start, 0
+        while end < len(sentences) and (end == start or words + counts[end] <= max_words):
+            words += counts[end]
+            end += 1
+        if end < len(sentences):
+            running, candidates = 0, []
+            for cut in range(start + 1, end + 1):  # cut = index of the first sentence of the next chunk
+                running += counts[cut - 1]
+                if running >= max_words / 2:
+                    candidates.append(cut)
+            if candidates:
+                end = max(candidates, key=lambda cut: (pauses[cut], cut))
+        chunks.append(" ".join(sentences[start:end]))
+        start = end
     return chunks
 
 
@@ -185,22 +200,45 @@ def unassign_unknown_speaker(item: str) -> str:
 
 
 class Editor:
-    """The clean-up and summary passes, on top of any `ask(system, user, max_tokens) -> str`.
+    """The clean-up and summary passes, on top of any `ask_many(requests) -> list[str]`.
 
-    Everything here is plain text handling, so it runs wherever the transcript
-    is; only `ask` reaches the model (see LocalModel and llm_main).
+    A request is (system, user, max_tokens). Everything here is plain text
+    handling, so it runs wherever the transcript is; only `ask_many` reaches
+    the model (see LocalModel and llm_main).
     """
 
-    def __init__(self, ask):
-        self._ask = ask
+    def __init__(self, ask_many, batch_size: int = 4):
+        self._ask_many = ask_many
+        self._batch_size = max(1, batch_size)
+
+    def _ask(self, system: str, user: str, max_tokens: int) -> str:
+        return self._ask_many([(system, user, max_tokens)])[0]
+
+    def clean_many(self, texts: list[str], progress=lambda fraction: None) -> list[str]:
+        """Clean each passage independently, several per model call.
+
+        Batching is only for speed: the model generates for a few passages at
+        once, about twice as fast as one after another.
+        """
+        out = [strip_fillers(text) if len(text.split()) < _MIN_LLM_WORDS else None for text in texts]
+        todo = [i for i, cleaned in enumerate(out) if cleaned is None]
+        total = sum(len(texts[i].split()) for i in todo) or 1
+        done = 0
+        for at in range(0, len(todo), self._batch_size):
+            batch = todo[at : at + self._batch_size]
+            answers = self._ask_many([
+                (SYSTEM_PROMPT, f"<transcript>\n{texts[i]}\n</transcript>", len(texts[i].split()) * 3 + 200)
+                for i in batch
+            ])  # fmt: skip
+            for i, raw in zip(batch, answers):
+                cleaned = normalize_paragraphs(raw)
+                out[i] = cleaned if plausible(texts[i], cleaned) else texts[i]
+                done += len(texts[i].split())
+            progress(done / total)
+        return out
 
     def clean(self, text: str) -> str:
-        if len(text.split()) < _MIN_LLM_WORDS:
-            return strip_fillers(text)
-
-        raw = self._ask(SYSTEM_PROMPT, f"<transcript>\n{text}\n</transcript>", len(text.split()) * 3 + 200)
-        cleaned = normalize_paragraphs(raw)
-        return cleaned if plausible(text, cleaned) else text
+        return self.clean_many([text])[0]
 
     def summarize(self, blocks: list[str], diarized: bool, progress=lambda fraction: None) -> dict | None:
         """Key points and action items for a transcript given as speaker turns.
@@ -233,31 +271,41 @@ class LocalModel:
 
         self.model, self.tokenizer = load(model_id)
 
-    def ask(self, system: str, user: str, max_tokens: int) -> str:
+    def ask_many(self, requests: list[tuple[str, str, int]]) -> list[str]:
+        """Answer each (system, user, max_tokens) request; several are generated as one batch."""
         import mlx.core as mx
-        from mlx_lm import generate
+        from mlx_lm import batch_generate, generate
         from mlx_lm.sample_utils import make_sampler
 
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+        prompts = []
+        for system, user, _ in requests:
+            messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+            try:
+                # Reasoning models would otherwise spend the token budget thinking out loud.
+                prompts.append(self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False))
+            except TypeError:
+                prompts.append(self.tokenizer.apply_chat_template(messages, add_generation_prompt=True))
+        limits = [max_tokens for _, _, max_tokens in requests]
+        sampler = make_sampler(temp=0.0)
         try:
-            # Reasoning models would otherwise spend the token budget thinking out loud.
-            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, enable_thinking=False)
-        except TypeError:
-            prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True)
-        try:
-            return generate(self.model, self.tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=make_sampler(temp=0.0))
+            if len(prompts) == 1:
+                return [generate(self.model, self.tokenizer, prompt=prompts[0], max_tokens=limits[0], sampler=sampler)]
+            return batch_generate(self.model, self.tokenizer, prompts, max_tokens=limits, sampler=sampler).texts
         finally:
-            if len(prompt) > 2000:  # a long transcript leaves gigabytes of buffers cached
+            if sum(len(prompt) for prompt in prompts) > 2000:  # long inputs leave gigabytes of buffers cached
                 mx.clear_cache()
+
+    def ask(self, system: str, user: str, max_tokens: int) -> str:
+        return self.ask_many([(system, user, max_tokens)])[0]
 
 
 def llm_main(conn, model_id: str):
     """Entry point of the one process that holds the language model.
 
     The model is several GB, so it is loaded once and shared by every worker
-    rather than once per parallel job. Receives (system, user, max_tokens);
-    replies ("ok", text) or ("error", message). The first message sent is
-    ("ready", error_or_None).
+    rather than once per parallel job. Receives a list of (system, user,
+    max_tokens) requests; replies ("ok", [text, ...]) or ("error", message).
+    The first message sent is ("ready", error_or_None).
     """
     try:
         try:
@@ -269,9 +317,9 @@ def llm_main(conn, model_id: str):
             return
         conn.send(("ready", None))
         while True:
-            request = conn.recv()
+            requests = conn.recv()
             try:
-                conn.send(("ok", model.ask(*request)))
+                conn.send(("ok", model.ask_many(requests)))
             except Exception as exc:  # noqa: BLE001 - one bad request must not kill the model
                 conn.send(("error", f"{type(exc).__name__}: {exc}"))
     except (EOFError, KeyboardInterrupt):

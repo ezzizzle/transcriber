@@ -35,10 +35,12 @@ disk on every request, so UI edits only need a page reload.
   diarization models. They talk over a pipe: `("stage", name, progress)`, then
   `("done", result)` or `("error", message, is_user_error)`.
 - The language model lives in one extra process (`cleanup.llm_main`), shared by
-  all workers to save memory. A worker sends `("llm", system, user, max_tokens)`
-  up its pipe; the parent's `SharedLLM` forwards it under a lock and relays the
-  answer. Prompt building and output checking (`cleanup.Editor`) stay in the
-  worker; only raw `ask` calls cross processes.
+  all workers to save memory. A worker sends `("llm", [(system, user,
+  max_tokens), ...])` up its pipe; the parent's `SharedLLM` forwards the batch
+  under a lock and relays the answers. Prompt building and output checking
+  (`cleanup.Editor`) stay in the worker; only raw `ask_many` calls cross
+  processes. Clean-up sends several passages per call because batched
+  generation is about twice as fast.
 - `cleanup.py` holds both LLM passes (clean-up and the key points / action
   items summary); `formats.py` renders a result dict (shape
   documented at the top of that file) into text, Markdown, SRT, VTT and JSON.
@@ -61,6 +63,10 @@ disk on every request, so UI edits only need a page reload.
 - **Timestamps carry raw text.** Clean-up rewrites `turns` only. Segments,
   words, SRT and VTT stay as transcribed, because cleaned text no longer lines
   up with the timings.
+- **Transcription timestamps cannot show pauses.** Parakeet's tokens run edge
+  to edge, so the gap between sentences is always zero. Pauses come from
+  `detect_silences` (ffmpeg) instead; `chunk_sentences` uses them to decide
+  where a long turn is cut, and every cut becomes a paragraph break.
 - **Clean-up must fail safe.** `cleanup.plausible()` discards LLM output that
   is much shorter or longer than its input and keeps the original passage.
   Keep that guard when changing the prompt or the model.

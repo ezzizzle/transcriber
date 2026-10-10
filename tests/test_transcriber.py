@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from transcriber import cleanup, formats, multipart
-from transcriber.pipeline import Job, Options, assign_speakers, build_turns, tokens_to_words
+from transcriber.pipeline import Job, Options, assign_speakers, build_turns, pause_before, tokens_to_words
 
 
 def body(boundary: str, *parts: tuple[str, bytes]) -> bytes:
@@ -125,6 +125,42 @@ class CleanupHelpersTest(unittest.TestCase):
         self.assertEqual(cleanup.normalize_paragraphs("<think>x</think>One.\nTwo.\n\n\nThree."), "One.\n\nTwo.\n\nThree.")
 
 
+class ChunkingTest(unittest.TestCase):
+    def test_cut_at_longest_pause(self):
+        sentences = ["a b", "c d", "e f", "g h", "i j", "k l"]
+        # No pauses known: chunks are simply filled.
+        self.assertEqual(cleanup.chunk_sentences(sentences, max_words=8), ["a b c d e f g h", "i j k l"])
+        # A long pause before "e f": cut there, even though more would fit.
+        pauses = [0, 0.3, 1.2, 0.3, 0.3, 0.3]
+        self.assertEqual(cleanup.chunk_sentences(sentences, pauses, max_words=8), ["a b c d", "e f g h i j k l"])
+        # A pause in the first half of the chunk is ignored, so chunks don't become tiny.
+        pauses = [0, 2.0, 0.3, 0.3, 0.3, 0.3]
+        self.assertEqual(cleanup.chunk_sentences(sentences, pauses, max_words=8), ["a b c d e f g h", "i j k l"])
+        # One sentence longer than the limit still gets through, alone.
+        self.assertEqual(cleanup.chunk_sentences(["a b c d e", "f"], max_words=3), ["a b c d e", "f"])
+
+    def test_pause_before(self):
+        silences = [(4.6, 4.85), (12.2, 13.05), (25.8, 26.6)]
+        self.assertAlmostEqual(pause_before(silences, 12.88), 0.85)  # sentence start falls inside the pause
+        self.assertAlmostEqual(pause_before(silences, 4.8), 0.25)
+        self.assertEqual(pause_before(silences, 20.0), 0.0)
+        self.assertEqual(pause_before([], 5.0), 0.0)
+
+    def test_clean_many_batches_and_guards(self):
+        calls = []
+
+        def ask_many(requests):
+            calls.append(len(requests))
+            # Echo the passage back, except one answer that goes off the rails.
+            return ["Sure!" if "bad" in user else user.split("\n")[1] for _, user, _ in requests]
+
+        long = lambda word: " ".join([word] * 20)
+        texts = [long("one"), "Um, yeah.", long("two"), long("bad"), long("three"), long("four")]
+        out = cleanup.Editor(ask_many, batch_size=2).clean_many(texts)
+        self.assertEqual(calls, [2, 2, 1])  # the short passage never reaches the model
+        self.assertEqual(out, [long("one"), "Yeah.", long("two"), long("bad"), long("three"), long("four")])
+
+
 class SummaryTest(unittest.TestCase):
     def test_parse_summary(self):
         raw = "<think>hm</think>## Key points\n- **Release** moved to March.\n* Budget is over.\n\n**Action items**\n1. Speaker 2: tell the team (no deadline specified)\nSpeaker 3: send it (Thursday)\n- None\n"
@@ -138,7 +174,7 @@ class SummaryTest(unittest.TestCase):
 
     def test_undiarized_owner(self):
         answer = "## Key points\n- A\n## Action items\n- Speaker: email legal (today)\n- Priya: fix the bug (by Wednesday)"
-        ask = lambda system, user, max_tokens: answer
+        ask = lambda requests: [answer for _ in requests]
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], False)["action_items"],
                          ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["action_items"][0], "Speaker: email legal (today)")

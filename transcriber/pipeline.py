@@ -14,7 +14,9 @@ extra process holds a single copy and the workers take turns with it, relayed
 through the server process (worker -> Engine -> SharedLLM -> llm_main).
 """
 
+import bisect
 import multiprocessing
+import re
 import shutil
 import subprocess
 import threading
@@ -119,6 +121,44 @@ def convert_to_wav(src: Path, dst: Path):
         raise PipelineError(f"ffmpeg could not read audio from this file: {detail}")
 
 
+def detect_silences(wav: Path) -> list[tuple[float, float]]:
+    """(start, end) of every pause of a quarter second or more, found with ffmpeg.
+
+    The transcription's own timestamps can't provide this: its tokens run
+    edge to edge, so sentences never show a gap. "Silent" is judged against
+    the recording's average level, so quiet and loud recordings both work.
+    Returns [] if anything goes wrong; pauses only steer where clean-up cuts.
+    """
+    ffmpeg = shutil.which("ffmpeg")
+
+    def run(audio_filter: str) -> str:
+        cmd = [ffmpeg, "-nostdin", "-hide_banner", "-i", str(wav), "-af", audio_filter, "-f", "null", "-"]
+        return subprocess.run(cmd, capture_output=True, text=True, errors="replace").stderr
+
+    try:
+        mean = float(re.search(r"mean_volume: (-?[\d.]+) dB", run("volumedetect")).group(1))
+        threshold = max(-60.0, min(-30.0, mean - 17.0))
+        log = run(f"silencedetect=noise={threshold:.1f}dB:d=0.25")
+        starts = [float(x) for x in re.findall(r"silence_start: (-?[\d.]+)", log)]
+        ends = [float(x) for x in re.findall(r"silence_end: (-?[\d.]+)", log)]
+        return list(zip(starts, ends))  # a silence still open at the end of the file has no end; dropped
+    except (AttributeError, OSError, TypeError, ValueError):
+        return []
+
+
+def pause_before(silences: list[tuple[float, float]], start: float) -> float:
+    """Length of the longest silence around a sentence's start time, in seconds."""
+    lo, hi = start - 0.6, start + 0.3  # sentence starts are only accurate to a few tenths
+    first = bisect.bisect_left(silences, (lo - 30.0, 0.0))
+    longest = 0.0
+    for s, e in silences[first:]:
+        if s > hi:
+            break
+        if e >= lo:
+            longest = max(longest, e - s)
+    return longest
+
+
 def wav_duration(path: Path) -> float:
     return max(0, path.stat().st_size - 44) / (SAMPLE_RATE * 2)
 
@@ -173,12 +213,14 @@ def build_turns(segments: list[dict]) -> list[dict]:
         if turns and turns[-1]["speaker"] == seg.get("speaker"):
             turns[-1]["end"] = seg["end"]
             turns[-1]["sentences"].append(seg["text"])
+            turns[-1]["starts"].append(seg["start"])
         else:
             turns.append({
                 "speaker": seg.get("speaker"),
                 "start": seg["start"],
                 "end": seg["end"],
                 "sentences": [seg["text"]],
+                "starts": [seg["start"]],
             })  # fmt: skip
     for turn in turns:
         turn["text"] = " ".join(turn["sentences"])
@@ -191,12 +233,12 @@ def build_turns(segments: list[dict]) -> list[dict]:
 class Pipeline:
     """Owns the speech models and runs one file at a time. Lives in a worker process.
 
-    `ask(system, user, max_tokens) -> str` is how it reaches the shared language model.
+    `ask_many(requests) -> list[str]` is how it reaches the shared language model.
     """
 
-    def __init__(self, config: Config, ask):
+    def __init__(self, config: Config, ask_many):
         self.config = config
-        self._editor = cleanup.Editor(ask)
+        self._editor = cleanup.Editor(ask_many, config.cleanup_batch)
         self._diar_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="diarize")
         self._asr = None
         self._diarizer = None
@@ -225,6 +267,7 @@ class Pipeline:
             report("Converting audio")
             with timed("convert"):
                 convert_to_wav(src, wav)
+                silences = detect_silences(wav) if options.cleanup else []
             duration = wav_duration(wav)
             if duration < 0.1:
                 raise PipelineError("This file contains no audio.")
@@ -257,10 +300,10 @@ class Pipeline:
             cleaned = False
             if options.cleanup and turns:
                 with timed("cleanup"):
-                    turns = self._cleanup(turns, report)
+                    turns = self._cleanup(turns, silences, report)
                 cleaned = True
             for turn in turns:
-                del turn["sentences"]
+                del turn["sentences"], turn["starts"]
 
             summary = None
             if options.summary and turns:
@@ -351,17 +394,21 @@ class Pipeline:
         blocks = [f"{t['speaker']}: {t['text']}" if diarized else t["text"] for t in turns]
         return self._editor.summarize(blocks, diarized, lambda fraction: report("Summarizing", fraction))
 
-    def _cleanup(self, turns: list[dict], report) -> list[dict]:
+    def _cleanup(self, turns: list[dict], silences: list[tuple[float, float]], report) -> list[dict]:
         report("Cleaning up text", 0.0)
-        total = sum(len(t["text"].split()) for t in turns) or 1
-        seen = 0
+        # Long turns are cut into chunks at the speaker's pauses; every chunk
+        # of every turn then goes through the model, a few at a time.
+        chunks, owner = [], []
+        for index, turn in enumerate(turns):
+            pauses = [pause_before(silences, start) for start in turn["starts"]]
+            for chunk in cleanup.chunk_sentences(turn["sentences"], pauses):
+                chunks.append(chunk)
+                owner.append(index)
+        cleaned = self._editor.clean_many(chunks, lambda fraction: report("Cleaning up text", fraction))
+
         kept = []
-        for turn in turns:
-            parts = []
-            for chunk in cleanup.chunk_sentences(turn["sentences"]):
-                parts.append(self._editor.clean(chunk))
-                seen += len(chunk.split())
-                report("Cleaning up text", seen / total)
+        for index, turn in enumerate(turns):
+            parts = [text for text, turn_index in zip(cleaned, owner) if turn_index == index]
             text = "\n\n".join(p for p in parts if p)
             if not text:  # the whole turn was filler ("Um.")
                 continue
@@ -379,17 +426,17 @@ def worker_main(conn, config: Config, preload: bool):
     Receives (job_id, path, options) over `conn`; replies with any number of
     ("stage", name, progress) messages, then ("done", result) or
     ("error", message, is_user_error). To use the language model it sends
-    ("llm", system, user, max_tokens) and waits for ("llm", text_or_None, error).
+    ("llm", [(system, user, max_tokens), ...]) and waits for ("llm", texts_or_None, error).
     """
 
-    def ask(system: str, user: str, max_tokens: int) -> str:
-        conn.send(("llm", system, user, max_tokens))
-        _, text, error = conn.recv()
+    def ask_many(requests: list[tuple[str, str, int]]) -> list[str]:
+        conn.send(("llm", requests))
+        _, texts, error = conn.recv()
         if error:
             raise RuntimeError(error)
-        return text
+        return texts
 
-    pipeline = Pipeline(config, ask)
+    pipeline = Pipeline(config, ask_many)
     try:
         if preload:
             error = None
@@ -432,15 +479,15 @@ class SharedLLM:
 
     def __init__(self, mp_context, model_id: str):
         self._mp, self._model_id = mp_context, model_id
-        self._lock = threading.Lock()  # one request at a time; jobs interleave chunk by chunk
+        self._lock = threading.Lock()  # one batch at a time; jobs interleave batch by batch
         self._proc = self._conn = None
 
-    def ask(self, job: Job, system: str, user: str, max_tokens: int) -> str:
+    def ask(self, job: Job, requests: list[tuple[str, str, int]]) -> list[str]:
         with self._lock:
             try:
                 if self._proc is None or not self._proc.is_alive():
                     self._start(job)
-                self._conn.send((system, user, max_tokens))
+                self._conn.send(requests)
                 status, value = self._conn.recv()
             except (EOFError, OSError) as exc:
                 self._stop()
