@@ -101,6 +101,12 @@ Allowlists by hostname need the CDN hosts as well as the front doors:
 `release-assets.githubusercontent.com` (uv's Python); `huggingface.co` and
 `*.hf.co` (models).
 
+Each finished transcript in the web UI has a "Times" toggle next to its total that opens a table of how long every stage took (convert,
+transcribe, identify speakers, clean up, summary, and any model loading or
+queueing). Speaker identification runs alongside transcription, so the stages
+can add up to more than the total. The same figures are in `GET /api/jobs` as
+`timings` and in the JSON download.
+
 ## Concurrency
 
 Up to `TRANSCRIBER_MAX_PARALLEL` jobs are processed at once; the rest wait in a

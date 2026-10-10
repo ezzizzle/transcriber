@@ -23,6 +23,7 @@ import traceback
 import uuid
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,6 +35,11 @@ SAMPLE_RATE = 16000
 
 class PipelineError(Exception):
     """A failure the user can do something about (bad file, missing ffmpeg...)."""
+
+
+# Keys of a job's per-stage timings, in the order the stages run. "speakers" is
+# the diarizer's own running time, which mostly overlaps with "transcribe".
+STAGE_KEYS = ("queue", "convert", "speech_load", "transcribe", "speakers", "llm_load", "cleanup", "summary")
 
 
 @dataclass
@@ -61,6 +67,20 @@ class Job:
     started: float | None = None
     finished: float | None = None
     done: threading.Event = field(default_factory=threading.Event)
+    llm_load_seconds: float = 0.0  # time this job spent waiting for the language model to load
+
+    def timings(self) -> dict | None:
+        """Seconds per stage for a finished job, in the order the stages ran."""
+        if not self.result:
+            return None
+        spent = dict(self.result.get("timings") or {})
+        if self.llm_load_seconds:
+            # The worker can't see the load; it happened inside its first language-model stage.
+            first = "cleanup" if "cleanup" in spent else "summary"
+            spent[first] = round(max(0.0, spent.get(first, 0.0) - self.llm_load_seconds), 2)
+            spent["llm_load"] = round(self.llm_load_seconds, 2)
+        spent["queue"] = round(self.started - self.created, 2)
+        return {key: spent[key] for key in STAGE_KEYS if key in spent}
 
     def summary(self, queue_position: int | None = None) -> dict:
         return {
@@ -77,6 +97,7 @@ class Job:
             "created": self.created,
             "elapsed": round((self.finished or time.time()) - self.started, 1) if self.started else None,
             "duration": self.result["duration"] if self.result else None,
+            "timings": self.timings(),
         }
 
 
@@ -190,9 +211,20 @@ class Pipeline:
         """Transcribe `src`. `report(stage, progress=None)` receives status updates."""
         wav = self.config.work_dir / f"{job_id}.wav"
         diar_future = None
+        timings: dict[str, float] = {}  # seconds per stage, keyed as in STAGE_KEYS
+
+        @contextmanager
+        def timed(key: str):
+            start = time.monotonic()
+            try:
+                yield
+            finally:
+                timings[key] = round(timings.get(key, 0.0) + time.monotonic() - start, 2)
+
         try:
             report("Converting audio")
-            convert_to_wav(src, wav)
+            with timed("convert"):
+                convert_to_wav(src, wav)
             duration = wav_duration(wav)
             if duration < 0.1:
                 raise PipelineError("This file contains no audio.")
@@ -201,12 +233,18 @@ class Pipeline:
             if options.diarize:
                 diar_future = self._diar_pool.submit(self._diarize, wav)
 
-            segments, words = self._transcribe(wav, report)
+            if self._asr is None:
+                report("Loading speech model")
+                with timed("speech_load"):
+                    self.load_asr()
+            with timed("transcribe"):
+                segments, words = self._transcribe(wav, report)
             self._free_gpu_cache()
 
             if diar_future is not None:
                 report("Identifying speakers")
-                diarization = diar_future.result()
+                # Its own running time, most of which overlapped with transcription.
+                diarization, timings["speakers"] = diar_future.result()
                 assign_speakers(segments, diarization)
                 by_start = iter(words)
                 for seg in segments:  # words inherit their segment's speaker
@@ -218,14 +256,16 @@ class Pipeline:
             turns = build_turns(segments)
             cleaned = False
             if options.cleanup and turns:
-                turns = self._cleanup(turns, report)
+                with timed("cleanup"):
+                    turns = self._cleanup(turns, report)
                 cleaned = True
             for turn in turns:
                 del turn["sentences"]
 
             summary = None
             if options.summary and turns:
-                summary = self._summarize(turns, options.diarize, report)
+                with timed("summary"):
+                    summary = self._summarize(turns, options.diarize, report)
 
             return {
                 "duration": round(duration, 3),
@@ -240,6 +280,7 @@ class Pipeline:
                 "turns": turns,
                 "segments": segments,
                 "words": words,
+                "timings": timings,
             }
         finally:
             self._free_gpu_cache()
@@ -257,9 +298,6 @@ class Pipeline:
     def _transcribe(self, wav: Path, report) -> tuple[list[dict], list[dict]]:
         from parakeet_mlx import DecodingConfig, SentenceConfig
 
-        if self._asr is None:
-            report("Loading speech model")
-            self.load_asr()
         report("Transcribing", 0.0)
 
         def on_chunk(position, total):
@@ -298,13 +336,15 @@ class Pipeline:
             })  # fmt: skip
         return segments, words
 
-    def _diarize(self, wav: Path) -> list[dict]:
+    def _diarize(self, wav: Path) -> tuple[list[dict], float]:
+        """Returns (speaker segments, seconds taken)."""
+        start = time.monotonic()
         if self._diarizer is None:
             import senko
 
             self._diarizer = senko.Diarizer(device="auto", warmup=True, quiet=True)
         result = self._diarizer.diarize(str(wav), generate_colors=False)
-        return list(result["merged_segments"]) if result else []
+        return (list(result["merged_segments"]) if result else []), round(time.monotonic() - start, 2)
 
     def _summarize(self, turns: list[dict], diarized: bool, report) -> dict | None:
         report("Summarizing", 0.0)
@@ -411,6 +451,7 @@ class SharedLLM:
 
     def _start(self, job: Job):
         shown = job.stage, job.progress
+        started = time.monotonic()
         job.stage, job.progress = "Loading language model", None  # may include the download
         parent_conn, child_conn = self._mp.Pipe()
         self._proc = self._mp.Process(
@@ -421,6 +462,7 @@ class SharedLLM:
         self._conn = parent_conn
         error = self._conn.recv()[1]
         job.stage, job.progress = shown
+        job.llm_load_seconds += time.monotonic() - started
         if error:
             self._stop()
             raise RuntimeError(error)

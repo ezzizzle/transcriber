@@ -7,7 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from transcriber import cleanup, formats, multipart
-from transcriber.pipeline import assign_speakers, build_turns, tokens_to_words
+from transcriber.pipeline import Job, Options, assign_speakers, build_turns, tokens_to_words
 
 
 def body(boundary: str, *parts: tuple[str, bytes]) -> bytes:
@@ -76,6 +76,19 @@ class PipelineHelpersTest(unittest.TestCase):
         turns = build_turns(segments)
         self.assertEqual([(t["speaker"], t["text"]) for t in turns],
                          [("Speaker 1", "Hi. How are you?"), ("Speaker 2", "Good."), ("Speaker 1", "Great.")])
+
+
+class TimingsTest(unittest.TestCase):
+    def test_job_timings(self):
+        job = Job(filename="a.mp3", path=Path("a.mp3"), options=Options(cleanup=True, summary=True))
+        self.assertIsNone(job.timings())
+        job.created, job.started = 100.0, 103.5
+        job.llm_load_seconds = 8.0
+        job.result = {"timings": {"summary": 4.0, "cleanup": 20.0, "transcribe": 3.0, "convert": 0.4}}
+        self.assertEqual(
+            list(job.timings().items()),  # in pipeline order, with the model load split out of clean-up
+            [("queue", 3.5), ("convert", 0.4), ("transcribe", 3.0), ("llm_load", 8.0), ("cleanup", 12.0), ("summary", 4.0)],
+        )
 
 
 class FormatsTest(unittest.TestCase):

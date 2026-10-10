@@ -55,6 +55,15 @@
   .tag { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
   .job-status { flex-basis: 100%; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
   .job.error .job-status { color: var(--danger); }
+  .job-status button { border: 0; padding: 0 2px; margin-left: 8px; color: var(--accent); font-size: 13px; }
+  .job-status button::after { content: " ▸"; }
+  .job-status button[aria-expanded="true"]::after { content: " ▾"; }
+  .job-timings-wrap { flex-basis: 100%; }
+  .job-timings { border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; margin: 2px 0 4px; }
+  .job-timings th { font-weight: 400; text-align: left; color: var(--muted); padding: 3px 28px 3px 0; }
+  .job-timings td { text-align: right; padding: 3px 0; }
+  .job-timings tr + tr th, .job-timings tr + tr td { border-top: 1px solid var(--line); }
+  .job-timings small { display: block; font-size: 12px; }
   .bar { flex-basis: 100%; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
   .bar i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .4s; }
   .bar.indeterminate i { width: 30%; animation: slide 1.4s ease-in-out infinite; }
@@ -179,13 +188,18 @@ function makeRow(id) {
   const row = { id, open: false, loaded: false };
   row.name = el("div", { className: "job-name" });
   row.tags = el("div", { className: "tags" });
-  row.status = el("div", { className: "job-status" });
+  row.status = el("span");
+  row.timingsBtn = el("button", { type: "button", textContent: "Times", hidden: true, onclick: () => toggleTimings(row) });
+  row.timingsBtn.setAttribute("aria-expanded", "false");
+  row.statusLine = el("div", { className: "job-status" }, row.status, row.timingsBtn);
+  row.timingsTable = el("table", { className: "job-timings" });
+  row.timings = el("div", { className: "job-timings-wrap", hidden: true }, row.timingsTable);
   row.barFill = el("i");
   row.bar = el("div", { className: "bar" }, row.barFill);
   row.actions = el("div", { className: "actions" });
   row.transcript = el("div", { className: "transcript", hidden: true });
   row.root = el("div", { className: "job card" },
-    el("div", { className: "job-head" }, row.name, row.tags, row.status, row.bar, row.actions),
+    el("div", { className: "job-head" }, row.name, row.tags, row.statusLine, row.timings, row.bar, row.actions),
     row.transcript);
   return row;
 }
@@ -205,6 +219,30 @@ function setBar(row, progress, visible) {
   row.barFill.style.width = progress == null ? "" : `${Math.round(progress * 100)}%`;
 }
 
+// Per-stage timings from the server, in the order the stages ran.
+const STAGE_LABELS = {
+  queue: "Queued", convert: "Convert audio", speech_load: "Load speech model", transcribe: "Transcribe",
+  speakers: "Identify speakers", llm_load: "Load language model", cleanup: "Clean up text",
+  summary: "Key points and action items",
+};
+const seconds = (s) => (s < 10 ? `${s.toFixed(1)}s` : s < 60 ? `${Math.round(s)}s` : clock(s));
+
+function showTimings(row, timings) {
+  const entries = Object.entries(timings ?? {}).filter(([key, s]) => key !== "queue" || s >= 1);
+  row.timingsBtn.hidden = entries.length === 0;
+  if (!entries.length) row.timings.hidden = true;
+  row.timingsTable.replaceChildren(...entries.map(([key, s]) => {
+    const label = el("th", { scope: "row", textContent: STAGE_LABELS[key] ?? key });
+    if (key === "speakers") label.append(el("small", { textContent: "ran at the same time as transcription" }));
+    return el("tr", {}, label, el("td", { textContent: seconds(s) }));
+  }));
+}
+
+function toggleTimings(row) {
+  row.timings.hidden = !row.timings.hidden;
+  row.timingsBtn.setAttribute("aria-expanded", String(!row.timings.hidden));
+}
+
 function updateJob(row, job) {
   setCommon(row, job.filename, job.diarize, job.cleanup, job.summarize);
   row.summarize = job.summarize;
@@ -214,7 +252,7 @@ function updateJob(row, job) {
 
   if (job.status === "error") row.status.textContent = `Failed: ${job.error}`;
   else if (job.status === "done")
-    row.status.textContent = `${clock(job.duration)} of audio · transcribed in ${clock(job.elapsed)}`;
+    row.status.textContent = `${clock(job.duration)} of audio · finished in ${clock(job.elapsed)}`;
   else if (job.status === "queued")
     row.status.textContent = job.queue_position
       ? `Waiting in queue: number ${job.queue_position} in line` : "Starting…";
@@ -225,6 +263,7 @@ function updateJob(row, job) {
 
   if (row.state === job.status) return;
   row.state = job.status;
+  showTimings(row, job.timings);
   row.actions.replaceChildren();
   if (job.status === "done") {
     row.viewBtn = el("button", { className: "primary", textContent: "View", onclick: () => toggle(row) });

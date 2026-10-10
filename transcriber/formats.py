@@ -9,6 +9,7 @@ A result is a plain dict:
       "words":    [{"word", "start", "end", "speaker"|None}],
       "turns":    [{"speaker"|None, "start", "end", "text"}],
       "summary":  {"key_points": [str], "action_items": [str]} | None,
+      "timings":  {stage: seconds},  # worker-side stages; see pipeline.STAGE_KEYS
     }
 
 Segments and words always carry the raw transcription (they have timestamps).
