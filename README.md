@@ -181,12 +181,14 @@ Within a passage the model chooses the paragraph breaks.
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
-transcript and writes two short lists. They are appended below the transcript
+transcript and writes three sections: an Executive Summary of two sentences,
+Key Points, and Action Items. The executive summary is written last, from the
+key points, in a short step of its own. They are appended below the transcript
 in `text` responses and in the TXT and Markdown downloads, and returned as a
 separate field in every JSON format (where `text` stays transcript-only):
 
 ```json
-{"text": "...", "summary": {"key_points": ["..."], "action_items": ["Speaker 3: Send the breakdown (Thursday)"]}}
+{"text": "...", "summary": {"executive_summary": "Two sentences.", "key_points": ["..."], "action_items": ["Speaker 3: Send the breakdown (Thursday)"]}}
 ```
 
 Action items name an owner only when speakers are identified ("Speaker 2", or

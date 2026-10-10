@@ -317,7 +317,7 @@ class Pipeline:
                 "diarized": options.diarize,
                 "cleaned": cleaned,
                 "cleanup_model": self.config.cleanup_model if cleaned else None,
-                # {"key_points": [...], "action_items": [...]}; None if not requested or unusable.
+                # {"executive_summary": str, "key_points": [...], "action_items": [...]}; None if not requested or unusable.
                 "summary": summary,
                 "speakers": sorted({t["speaker"] for t in turns if t["speaker"]}, key=lambda s: int(s.split()[-1])),
                 "turns": turns,

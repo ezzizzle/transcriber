@@ -166,18 +166,22 @@ class SummaryTest(unittest.TestCase):
         raw = "<think>hm</think>## Key points\n- **Release** moved to March.\n* Budget is over.\n\n**Action items**\n1. Speaker 2: tell the team (no deadline specified)\nSpeaker 3: send it (Thursday)\n- None\n"
         self.assertEqual(
             cleanup.parse_summary(raw),
-            {"key_points": ["Release moved to March.", "Budget is over."], "action_items": ["Speaker 2: tell the team", "Speaker 3: send it (Thursday)"]},
+            {"executive_summary": "", "key_points": ["Release moved to March.", "Budget is over."], "action_items": ["Speaker 2: tell the team", "Speaker 3: send it (Thursday)"]},
         )
         self.assertEqual(cleanup.parse_summary("## Key points\n- A\n## Action items\n- None"),
-                         {"key_points": ["A"], "action_items": []})
+                         {"executive_summary": "", "key_points": ["A"], "action_items": []})
+        three = "## Executive Summary\nThe team met.\nThe release moved.\n\n## Key points\n- A\n\n## Action items\n- None"
+        self.assertEqual(cleanup.parse_summary(three),
+                         {"executive_summary": "The team met. The release moved.", "key_points": ["A"], "action_items": []})
         self.assertIsNone(cleanup.parse_summary("Sure! Here is a summary of the meeting."))
 
     def test_undiarized_owner(self):
         answer = "## Key points\n- A\n## Action items\n- Speaker: email legal (today)\n- Priya: fix the bug (by Wednesday)"
-        ask = lambda requests: [answer for _ in requests]
+        ask = lambda requests: ["They met. Things happened." if "<notes>" in user else answer for _, user, _ in requests]
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], False)["action_items"],
                          ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
         self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["action_items"][0], "Speaker: email legal (today)")
+        self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["executive_summary"], "They met. Things happened.")
 
     def test_split_for_summary(self):
         self.assertEqual(cleanup.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
@@ -188,7 +192,11 @@ class SummaryTest(unittest.TestCase):
         text = formats.to_text_with_summary(result)
         self.assertTrue(text.startswith("Speaker 1: Bye.\n\n"))
         self.assertIn("KEY POINTS\n- Said bye.\n\nACTION ITEMS\n- None", text)
-        self.assertIn("## Action items\n\n- None", formats.to_markdown(result))
+        self.assertNotIn("EXECUTIVE", text)  # nothing to show when the model gave none
+        self.assertIn("## Action Items\n\n- None", formats.to_markdown(result))
+        result["summary"]["executive_summary"] = "They said goodbye."
+        self.assertIn("EXECUTIVE SUMMARY\nThey said goodbye.\n\nKEY POINTS\n- Said bye.", formats.to_text_with_summary(result))
+        self.assertIn("## Executive Summary\n\nThey said goodbye.\n\n## Key Points\n\n- Said bye.", formats.to_markdown(result))
         self.assertEqual(formats.to_text(result), "Speaker 1: Bye.")  # JSON `text` stays transcript-only
         self.assertEqual(formats.to_verbose_json(result)["summary"]["key_points"], ["Said bye."])
         self.assertEqual(formats.to_text_with_summary(FormatsTest.result), "Speaker 1: Bye.")

@@ -92,6 +92,7 @@
   .summary h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
   .summary ul { margin: 0; padding-left: 20px; max-width: 68ch; }
   .summary li { margin-bottom: 4px; }
+  .summary p { margin: 0; max-width: 68ch; }
   .summary small { display: block; margin-top: 12px; color: var(--muted); font-size: 12px; }
   footer { margin-top: 32px; color: var(--muted); font-size: 13px; }
   footer h2 { margin-top: 24px; }
@@ -132,7 +133,7 @@
     </label>
     <label class="option card">
       <input id="opt-summary" type="checkbox">
-      <span><b>Key points and action items</b><small>A local language model adds a short summary and a to-do list below the transcript.</small></span>
+      <span><b>Summary and action items</b><small>A local language model adds an executive summary, key points and a to-do list below the transcript.</small></span>
     </label>
   </div>
 
@@ -147,7 +148,7 @@
     <dl id="models">
       <dt>Transcription</dt><dd id="model-asr">…</dd>
       <dt>Speaker identification</dt><dd id="model-diarization">…</dd>
-      <dt>Clean-up, key points and action items</dt><dd id="model-llm">…</dd>
+      <dt>Clean-up and summary</dt><dd id="model-llm">…</dd>
     </dl>
     <h2>API</h2>
     <p>The same pipeline is available as an OpenAI Whisper-compatible endpoint. <code>diarize</code>,
@@ -223,7 +224,7 @@ function setBar(row, progress, visible) {
 const STAGE_LABELS = {
   queue: "Queued", convert: "Convert audio", speech_load: "Load speech model", transcribe: "Transcribe",
   speakers: "Identify speakers", llm_load: "Load language model", cleanup: "Clean up text",
-  summary: "Key points and action items",
+  summary: "Summary and action items",
 };
 const seconds = (s) => (s < 10 ? `${s.toFixed(1)}s` : s < 60 ? `${Math.round(s)}s` : clock(s));
 
@@ -284,7 +285,10 @@ const SUMMARY_NOTE = "Machine-generated summary. Check it against the transcript
 function summarySections(result) {
   if (!result.summary) return [];
   const orNone = (items) => (items.length ? items : ["None"]);
-  return [["Key points", orNone(result.summary.key_points)], ["Action items", orNone(result.summary.action_items)]];
+  const sections = [["Key Points", orNone(result.summary.key_points)], ["Action Items", orNone(result.summary.action_items)]];
+  // The executive summary is a short paragraph (a string); the other two are lists.
+  if (result.summary.executive_summary) sections.unshift(["Executive Summary", result.summary.executive_summary]);
+  return sections;
 }
 
 async function loadTranscript(row) {
@@ -308,8 +312,10 @@ async function loadTranscript(row) {
   const sections = summarySections(row.result);
   if (sections.length) {
     const box = el("div", { className: "summary" });
-    for (const [heading, bullets] of sections)
-      box.append(el("h3", { textContent: heading }), el("ul", {}, ...bullets.map((b) => el("li", { textContent: b }))));
+    for (const [heading, body] of sections)
+      box.append(el("h3", { textContent: heading }), typeof body === "string"
+        ? el("p", { textContent: body })
+        : el("ul", {}, ...body.map((b) => el("li", { textContent: b }))));
     box.append(el("small", { textContent: SUMMARY_NOTE }));
     row.transcript.append(box);
   } else if (row.summarize && row.result.turns.length) {
@@ -330,8 +336,8 @@ async function toggle(row) {
 async function copy(row, button) {
   const result = await loadTranscript(row);
   const blocks = result.turns.map((t) => (t.speaker ? `${t.speaker}: ` : "") + t.text);
-  for (const [heading, bullets] of summarySections(result))
-    blocks.push(`${heading.toUpperCase()}\n` + bullets.map((b) => `- ${b}`).join("\n"));
+  for (const [heading, body] of summarySections(result))
+    blocks.push(`${heading.toUpperCase()}\n` + (typeof body === "string" ? body : body.map((b) => `- ${b}`).join("\n")));
   const text = blocks.join("\n\n");
   await navigator.clipboard.writeText(text);
   button.textContent = "Copied";

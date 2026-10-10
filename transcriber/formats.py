@@ -8,7 +8,7 @@ A result is a plain dict:
       "segments": [{"id", "start", "end", "text", "speaker"|None, "confidence"}],
       "words":    [{"word", "start", "end", "speaker"|None}],
       "turns":    [{"speaker"|None, "start", "end", "text"}],
-      "summary":  {"key_points": [str], "action_items": [str]} | None,
+      "summary":  {"executive_summary": str, "key_points": [str], "action_items": [str]} | None,
       "timings":  {stage: seconds},  # worker-side stages; see pipeline.STAGE_KEYS
     }
 
@@ -46,22 +46,32 @@ def to_text(result: dict) -> str:
 SUMMARY_NOTE = "Machine-generated summary. Check it against the transcript before relying on it."
 
 
-def summary_sections(result: dict) -> list[tuple[str, list[str]]]:
-    """[(heading, bullets)] for the summary, or [] when there isn't one."""
+def summary_sections(result: dict) -> list[tuple[str, str]]:
+    """[(heading, body)] for the summary, or [] when there isn't one.
+
+    The executive summary is a short paragraph; the other two are "- " lists.
+    """
     summary = result.get("summary")
     if not summary:
         return []
-    return [
-        ("Key points", summary["key_points"] or ["None"]),
-        ("Action items", summary["action_items"] or ["None"]),
+
+    def bullets(items):
+        return "\n".join(f"- {item}" for item in items or ["None"])
+
+    sections = [
+        ("Key Points", bullets(summary["key_points"])),
+        ("Action Items", bullets(summary["action_items"])),
     ]
+    if summary.get("executive_summary"):
+        sections.insert(0, ("Executive Summary", summary["executive_summary"]))
+    return sections
 
 
 def to_text_with_summary(result: dict) -> str:
-    """The transcript, then key points and action items if they were requested."""
+    """The transcript, then the summary sections if they were requested."""
     out = [to_text(result)]
-    for heading, bullets in summary_sections(result):
-        out.append(f"{heading.upper()}\n" + "\n".join(f"- {b}" for b in bullets))
+    for heading, body in summary_sections(result):
+        out.append(f"{heading.upper()}\n{body}")
     if len(out) > 1:
         out.insert(1, "-" * 40)
         out.append(f"({SUMMARY_NOTE})")
@@ -74,8 +84,8 @@ def to_markdown(result: dict, title: str = "Transcript") -> str:
         if result["diarized"]:
             out += [f"**{t['speaker']}** · {clock(t['start'])}", ""]
         out += [t["text"], ""]
-    for heading, bullets in summary_sections(result):
-        out += [f"## {heading}", "", *(f"- {b}" for b in bullets), ""]
+    for heading, body in summary_sections(result):
+        out += [f"## {heading}", "", body, ""]
     if result.get("summary"):
         out += [f"*{SUMMARY_NOTE}*", ""]
     return "\n".join(out).rstrip() + "\n"

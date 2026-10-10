@@ -96,6 +96,17 @@ merge points that say the same thing)
 - (every distinct action item from the parts, copied unchanged; drop exact \
 duplicates; if there are none, write "- None")"""
 
+# Asked separately, from the finished key points. Folding it into SUMMARY_PROMPT
+# as a third section made the model misattribute action items it had been
+# getting right, and write five lines where two were wanted.
+EXECUTIVE_PROMPT = """\
+You receive the key points and action items from a recording, inside <notes> tags. \
+Write an executive summary of it for someone who will read nothing else.
+
+Write between two to five sentences of plain prose, no more than 80 words in total: what the \
+recording was about, then its most important outcomes. Use only what is in the notes. \
+Output only the sentences: no heading, no dot points, no preamble."""
+
 # Roughly 50 minutes of speech; comfortably inside the model's context window.
 _SUMMARY_MAX_WORDS = 9000
 
@@ -174,15 +185,19 @@ def split_for_summary(blocks: list[str], max_words: int = _SUMMARY_MAX_WORDS) ->
 
 
 def parse_summary(markdown: str) -> dict | None:
-    """Pull the bullets out of the model's two sections; None if it produced neither."""
+    """Pull the model's three sections apart; None if it produced none of them.
+
+    Returns {"executive_summary": str, "key_points": [str], "action_items": [str]}.
+    """
     markdown = re.sub(r"<think>.*?</think>", "", markdown, flags=re.S)
-    sections = {"key_points": [], "action_items": []}
+    names = {"executive summary": "executive_summary", "key points": "key_points", "action items": "action_items"}
+    sections = {"executive_summary": [], "key_points": [], "action_items": []}
     current = None
     for line in markdown.splitlines():
         line = line.strip()
         heading = re.sub(r"[^a-z ]", "", line.lower()).strip()
-        if line.startswith("#") or heading in {"key points", "action items"}:
-            current = {"key points": "key_points", "action items": "action_items"}.get(heading)
+        if line.startswith("#") or heading in names:
+            current = names.get(heading)
             continue
         if current and line:  # the model sometimes forgets the bullet marker
             item = re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line)
@@ -191,7 +206,9 @@ def parse_summary(markdown: str) -> dict | None:
             item = re.sub(r"\s*\((?:no|none|not)\b[^)]*\)\s*$", "", item, flags=re.I).strip()  # "(no deadline given)"
             if item and item.lower().rstrip(".") != "none":
                 sections[current].append(item)
-    return sections if sections["key_points"] or sections["action_items"] else None
+    if not any(sections.values()):
+        return None
+    return {**sections, "executive_summary": " ".join(sections["executive_summary"])}  # prose, not a list
 
 
 def unassign_unknown_speaker(item: str) -> str:
@@ -253,14 +270,27 @@ class Editor:
         answers = []
         for i, part in enumerate(parts):
             answers.append(self._ask(system, f"<transcript>\n{part}\n</transcript>", 900))
-            progress((i + 1) / (len(parts) + (len(parts) > 1)))
+            progress((i + 1) / (len(parts) + 1 + (len(parts) > 1)))
         if len(answers) > 1:
             numbered = "\n\n".join(f"Part {i} of {len(answers)}:\n{a.strip()}" for i, a in enumerate(answers, 1))
             answers = [self._ask(MERGE_PROMPT, f"<parts>\n{numbered}\n</parts>", 1200)]
         summary = parse_summary(answers[0])
-        if summary and not diarized:
+        if summary is None:
+            return None
+        if not diarized:
             summary["action_items"] = [unassign_unknown_speaker(item) for item in summary["action_items"]]
+        if not summary["executive_summary"]:
+            summary["executive_summary"] = self._executive_summary(summary)
         return summary
+
+    def _executive_summary(self, summary: dict) -> str:
+        notes = "Key points:\n" + "\n".join(f"- {point}" for point in summary["key_points"])
+        if summary["action_items"]:
+            notes += "\n\nAction items:\n" + "\n".join(f"- {item}" for item in summary["action_items"])
+        answer = self._ask(EXECUTIVE_PROMPT, f"<notes>\n{notes}\n</notes>", 200)
+        answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S)
+        lines = [re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line.strip()) for line in answer.splitlines()]
+        return " ".join(line for line in lines if line and not line.startswith("#")).replace("**", "")
 
 
 class LocalModel:
