@@ -4,7 +4,7 @@ import socket
 import sys
 
 from .config import Config
-from .pipeline import Engine
+from .engine import Engine
 from .server import Server
 
 

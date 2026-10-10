@@ -1,0 +1,27 @@
+Um, okay, sorry, one more block of stuff before we go. The outage on Tuesday. Priya, can you, uh, just give us the short version?
+
+Yeah, so, um, basically the the queue backed up for about forty minutes, it started at like ten past two, and, uh, nobody noticed until support got a ticket. Root cause was a a config change that halved the worker count. We rolled it back and it it drained in about ten minutes after that. So total, roughly fifty minutes of delayed emails, no data loss.
+
+About three hundred and, um, sorry, three hundred and forty accounts had delayed emails. I'll write up the post-mortem properly, I'll have it done by Monday. And I'm gonna add an alert for the queue backing up, because the fact that support told us is, yeah, not great.
+
+Agreed. We should really document the deploy process as well at some point, it's all in people's heads. Anyway. Um, the database migration, are we still saying March?
+
+No, no, that slipped, it's April now. April the, uh, the fourteenth is the new date.
+
+Right, so the the design conference is in June and, uh, I'd like to go and I'd like to take Mia from support with me. It's about eleven hundred each with travel. I don't actually know if the budget covers two people, so I'll ask finance.
+
+Yeah, ask them. I'm not going to go this year, I've got too much on. Oh, and that reminds me, the the SSL certificate for the main site expires on the twenty eighth. I'll renew it before then, I did it last year so I know where everything is.
+
+Nice. Last one from me, I did those five customer interviews last week, the notes are a mess but there's some really good stuff about onboarding in there. I'll tidy them and send them round tomorrow morning.
+
+Great, I'd love to read those. Okay, um, I think that's really it this time. Thanks.
+
+Um, so, welcome everyone to the uh uh, the weekly planning meeting. Today I want to, you know, talk about the release schedule for the next quarter, and then, um, we can go over the budget.
+
+Thanks. Uh, I think, I think the main risk is the database migration. We, um, we have not tested it against production sized data yet, so I would like two more weeks before we commit to a date.
+
+Okay, that sounds reasonable. So, um, let's move the release to the end of March. Now, on a completely different topic. The office is moving to the third floor in April, so please, uh, pack up your desks by the 20th.
+
+Yeah, um, I mean, I guess the, uh, the thing is that we, we never really, um, decided who owns the the onboarding emails, right, so, uh, they just sort of, um, sit there.
+
+So, uh, basically, um, what I'm saying is, is that the, uh, the numbers for, um, for March look, uh, look fine, but, um, April is, you know, April is the one I'm, uh, worried about.

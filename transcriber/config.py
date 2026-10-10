@@ -37,14 +37,21 @@ class Config:
     asr_model: str = field(
         default_factory=lambda: _env("ASR_MODEL", "mlx-community/parakeet-tdt-0.6b-v3")
     )
-    cleanup_model: str = field(
-        default_factory=lambda: _env("CLEANUP_MODEL", "mlx-community/Qwen3.5-9B-MLX-4bit")
+    # The language model does both clean-up and summaries. TRANSCRIBER_CLEANUP_MODEL
+    # is the old name for this setting and is still read.
+    llm_model: str = field(
+        default_factory=lambda: _env("LLM_MODEL", _env("CLEANUP_MODEL", "mlx-community/Qwen3.5-9B-MLX-4bit"))
     )
 
     # Defaults for the Whisper-compatible endpoint when the request doesn't say.
     default_diarize: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_DIARIZE", "false")))
     default_cleanup: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_CLEANUP", "false")))
     default_summary: bool = field(default_factory=lambda: parse_bool(_env("DEFAULT_SUMMARY", "false")))
+
+    # Believe the X-Forwarded-User header. Only turn this on behind a reverse
+    # proxy that authenticates people and overwrites the header; otherwise
+    # anyone who can reach the port can claim to be anyone.
+    trust_user_header: bool = field(default_factory=lambda: parse_bool(_env("TRUST_USER_HEADER", "false")))
 
     max_upload_mb: int = field(default_factory=lambda: int(_env("MAX_UPLOAD_MB", "4096")))
     # Long audio is transcribed in overlapping windows of this many seconds.
@@ -55,9 +62,16 @@ class Config:
     # Jobs processed at once. Each parallel job has its own worker process and
     # its own speech models (about 6 GB at peak); the language model is shared.
     max_parallel: int = field(default_factory=lambda: max(1, int(_env("MAX_PARALLEL", str(_default_parallel())))))
-    # Extra workers (beyond the first) exit after this long with nothing to do.
+    # Uploads allowed to wait for a free worker. Each one holds a file on disk,
+    # so further uploads are turned away until the queue drains.
+    max_queue: int = field(default_factory=lambda: int(_env("MAX_QUEUE", "20")))
+    # Extra workers (beyond the first) and the language model exit after this
+    # long with nothing to do, to give their memory back.
     idle_unload_seconds: float = field(default_factory=lambda: float(_env("IDLE_UNLOAD_SECONDS", "600")))
-    # Finished jobs kept in memory for the web UI.
+    # A worker, the language model or ffmpeg that says nothing for this long is
+    # taken to be stuck: it is killed and the job fails.
+    stall_seconds: float = field(default_factory=lambda: float(_env("STALL_SECONDS", "900")))
+    # Finished transcripts kept in memory for the web UI, per user.
     max_jobs: int = field(default_factory=lambda: int(_env("MAX_JOBS", "50")))
     work_dir: Path = field(
         default_factory=lambda: Path(_env("WORK_DIR", str(Path(tempfile.gettempdir()) / "transcriber")))

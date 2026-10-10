@@ -1,57 +1,20 @@
-"""Fast tests for the parts that don't need a model. Run: uv run python -m unittest"""
+"""Everything that only handles text: building the transcript, clean-up, the summary, and the output formats."""
 
-import io
-import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from transcriber import cleanup, formats, multipart
-from transcriber.pipeline import Job, Options, assign_speakers, build_turns, pause_before, tokens_to_words
+from transcriber import cleanup, formats, summary
+from transcriber.audio import pause_before
+from transcriber.jobs import Job, Options
+from transcriber.transcript import Sentence, assign_speakers, build_turns, to_result, tokens_to_words
 
 
-def body(boundary: str, *parts: tuple[str, bytes]) -> bytes:
-    out = b""
-    for headers, payload in parts:
-        out += f"--{boundary}\r\n{headers}\r\n\r\n".encode() + payload + b"\r\n"
-    return out + f"--{boundary}--\r\n".encode()
+def sentence(start: float, end: float, text: str, speaker: str | None = None) -> Sentence:
+    return Sentence(start, end, text, confidence=0.9, words=[{"word": text, "start": start, "end": end}], speaker=speaker)
 
 
-class MultipartTest(unittest.TestCase):
-    def parse(self, raw: bytes, max_file=10**9):
-        self.dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        return multipart.parse(io.BytesIO(raw), "multipart/form-data; boundary=XyZ", len(raw), self.dir, max_file)
-
-    def test_fields_and_file(self):
-        # Larger than one read, and containing bytes that look like a boundary.
-        payload = (b"\r\n--Xy" + bytes(range(256))) * 3000
-        raw = body(
-            "XyZ",
-            ('Content-Disposition: form-data; name="diarize"', b"true"),
-            ('Content-Disposition: form-data; name="timestamp_granularities[]"', b"word"),
-            ('Content-Disposition: form-data; name="timestamp_granularities[]"', b"segment"),
-            ('Content-Disposition: form-data; name="file"; filename="my talk.WebM"\r\nContent-Type: video/webm', payload),
-        )
-        fields, files = self.parse(raw)
-        self.assertEqual(fields["diarize"], ["true"])
-        self.assertEqual(fields["timestamp_granularities[]"], ["word", "segment"])
-        upload = files["file"]
-        self.assertEqual((upload.filename, upload.size, upload.path.suffix), ("my talk.WebM", len(payload), ".WebM"))
-        self.assertEqual(upload.path.read_bytes(), payload)
-
-    def test_oversized_file_is_rejected_and_removed(self):
-        raw = body("XyZ", ('Content-Disposition: form-data; name="file"; filename="a.mp3"', b"x" * 5000))
-        with self.assertRaises(multipart.MultipartError):
-            self.parse(raw, max_file=1000)
-        self.assertEqual(list(self.dir.iterdir()), [])
-
-    def test_truncated_body(self):
-        raw = body("XyZ", ('Content-Disposition: form-data; name="file"; filename="a.mp3"', b"abc"))[:-12]
-        with self.assertRaises(multipart.MultipartError):
-            self.parse(raw)
-
-
-class PipelineHelpersTest(unittest.TestCase):
+class TranscriptTest(unittest.TestCase):
     def test_tokens_to_words(self):
         tokens = [SimpleNamespace(text=t, start=i, end=i + 1) for i, t in enumerate([" Hel", "lo", ",", " world"])]
         self.assertEqual(
@@ -59,23 +22,38 @@ class PipelineHelpersTest(unittest.TestCase):
             [{"word": "Hello,", "start": 0, "end": 3}, {"word": "world", "start": 3, "end": 4}],
         )
 
-    def test_assign_speakers_and_turns(self):
-        segments = [
-            {"start": 0.0, "end": 4.0, "text": "Hi."},
-            {"start": 4.0, "end": 6.0, "text": "How are you?"},
-            {"start": 6.2, "end": 6.5, "text": "Good."},  # falls in a gap: nearest speaker wins
-            {"start": 9.0, "end": 12.0, "text": "Great."},
+    def test_speakers_turns_and_result(self):
+        sentences = [
+            sentence(0.0, 4.0, "Hi."),
+            sentence(4.0, 6.0, "How are you?"),
+            sentence(6.2, 6.5, "Good."),  # falls in a gap: nearest speaker wins
+            sentence(9.0, 12.0, "Great."),
         ]
         diarization = [
             {"start": 6.6, "end": 8.0, "speaker": "SPEAKER_07"},
             {"start": 0.0, "end": 6.0, "speaker": "SPEAKER_03"},
             {"start": 8.5, "end": 12.0, "speaker": "SPEAKER_03"},
         ]
-        assign_speakers(segments, diarization)
-        self.assertEqual([s["speaker"] for s in segments], ["Speaker 1", "Speaker 1", "Speaker 2", "Speaker 1"])
-        turns = build_turns(segments)
-        self.assertEqual([(t["speaker"], t["text"]) for t in turns],
+        assign_speakers(sentences, diarization)
+        self.assertEqual([s.speaker for s in sentences], ["Speaker 1", "Speaker 1", "Speaker 2", "Speaker 1"])
+
+        turns = build_turns(sentences)
+        self.assertEqual([(t.speaker, t.text) for t in turns],
                          [("Speaker 1", "Hi. How are you?"), ("Speaker 2", "Good."), ("Speaker 1", "Great.")])
+        self.assertEqual((turns[0].start, turns[0].end), (0.0, 6.0))
+
+        result = to_result(sentences, turns, duration=12.0)
+        self.assertEqual(result["duration"], 12.0)
+        self.assertEqual(result["speakers"], ["Speaker 1", "Speaker 2"])
+        self.assertEqual(result["turns"][0], {"speaker": "Speaker 1", "start": 0.0, "end": 6.0, "text": "Hi. How are you?"})
+        self.assertEqual(result["segments"][2],
+                         {"id": 2, "start": 6.2, "end": 6.5, "text": "Good.", "speaker": "Speaker 2", "confidence": 0.9})
+        self.assertEqual(result["words"][2], {"word": "Good.", "start": 6.2, "end": 6.5, "speaker": "Speaker 2"})
+
+    def test_without_diarization_everyone_is_one_speaker(self):
+        sentences = [sentence(0.0, 1.0, "Hi.")]
+        assign_speakers(sentences, [])
+        self.assertEqual(sentences[0].speaker, "Speaker 1")
 
 
 class TimingsTest(unittest.TestCase):
@@ -86,7 +64,7 @@ class TimingsTest(unittest.TestCase):
         job.llm_load_seconds = 8.0
         job.result = {"timings": {"summary": 4.0, "cleanup": 20.0, "transcribe": 3.0, "convert": 0.4}}
         self.assertEqual(
-            list(job.timings().items()),  # in pipeline order, with the model load split out of clean-up
+            list(job.timings().items()),  # in the order the stages ran, with the model load split out of clean-up
             [("queue", 3.5), ("convert", 0.4), ("transcribe", 3.0), ("llm_load", 8.0), ("cleanup", 12.0), ("summary", 4.0)],
         )
 
@@ -110,7 +88,7 @@ class FormatsTest(unittest.TestCase):
         self.assertEqual(verbose["words"][0]["word"], "Bye.")
 
 
-class CleanupHelpersTest(unittest.TestCase):
+class CleanupTest(unittest.TestCase):
     def test_strip_fillers(self):
         self.assertEqual(cleanup.strip_fillers("Um, yeah, uh, sure."), "Yeah, sure.")
         self.assertEqual(cleanup.strip_fillers("Umm."), "")
@@ -137,7 +115,6 @@ class CleanupHelpersTest(unittest.TestCase):
         self.assertEqual(cleanup.normalize_paragraphs("<think>x</think>One.\nTwo.\n\n\nThree."), "One.\n\nTwo.\n\nThree.")
 
 
-class ChunkingTest(unittest.TestCase):
     def test_cut_at_longest_pause(self):
         sentences = ["a b", "c d", "e f", "g h", "i j", "k l"]
         # No pauses known: chunks are simply filled.
@@ -168,7 +145,7 @@ class ChunkingTest(unittest.TestCase):
 
         long = lambda word: " ".join([word] * 20)
         texts = [long("one"), "Um, yeah.", long("two"), long("bad"), long("three"), long("four")]
-        out = cleanup.Editor(ask_many, batch_size=2).clean_many(texts)
+        out = cleanup.clean_passages(ask_many, texts, batch_size=2)
         self.assertEqual(calls, [2, 2, 1])  # the short passage never reaches the model
         self.assertEqual(out, [long("one"), "Yeah.", long("two"), long("bad"), long("three"), long("four")])
 
@@ -176,36 +153,75 @@ class ChunkingTest(unittest.TestCase):
         left_in = "So the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon."
         rejected = "Um, " + " ".join(["word"] * 20)
         ask_many = lambda requests: [left_in if "queue" in user else "No." for _, user, _ in requests]
-        out = cleanup.Editor(ask_many).clean_many(["So, um, the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon.", rejected])
+        out = cleanup.clean_passages(ask_many, ["So, um, the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon.", rejected])
         self.assertEqual(out[0], "So the queue backed up, and nobody noticed until support got a ticket about it that afternoon.")
         self.assertEqual(out[1], " ".join(["Word"] + ["word"] * 19))  # the model's answer was rejected; the original is still swept
+
+
+    def test_clean_turns(self):
+        long = " ".join(["word"] * 20)
+        turns = build_turns([
+            sentence(0, 5, f"Um, {long}.", "Speaker 1"),
+            sentence(5, 6, "Um.", "Speaker 2"),  # nothing left once the filler is gone
+            sentence(6, 9, "Okay, uh, thanks.", "Speaker 1"),
+        ])
+        echo = lambda requests: [user.split("\n")[1] for _, user, _ in requests]
+        cleaned = cleanup.clean_turns(echo, turns, silences=[])
+        # Speaker 2's turn is dropped, which leaves Speaker 1's two turns side by side: they become one.
+        self.assertEqual(len(cleaned), 1)
+        self.assertEqual(cleaned[0].speaker, "Speaker 1")
+        self.assertEqual(cleaned[0].text, f"Word {long[5:]}.\n\nOkay, thanks.")
+        self.assertEqual((cleaned[0].start, cleaned[0].end), (0, 9))
+        self.assertEqual(turns[0].text, f"Um, {long}.")  # the originals are left alone
 
 
 class SummaryTest(unittest.TestCase):
     def test_parse_summary(self):
         raw = "<think>hm</think>## Key points\n- **Release** moved to March.\n* Budget is over.\n\n**Action items**\n1. Speaker 2: tell the team (no deadline specified)\nSpeaker 3: send it (Thursday)\n- None\n"
         self.assertEqual(
-            cleanup.parse_summary(raw),
+            summary.parse_summary(raw),
             {"executive_summary": "", "key_points": ["Release moved to March.", "Budget is over."], "action_items": ["Speaker 2: tell the team", "Speaker 3: send it (Thursday)"]},
         )
-        self.assertEqual(cleanup.parse_summary("## Key points\n- A\n## Action items\n- None"),
+        self.assertEqual(summary.parse_summary("## Key points\n- A\n## Action items\n- None"),
                          {"executive_summary": "", "key_points": ["A"], "action_items": []})
         three = "## Executive Summary\nThe team met.\nThe release moved.\n\n## Key points\n- A\n\n## Action items\n- None"
-        self.assertEqual(cleanup.parse_summary(three),
+        self.assertEqual(summary.parse_summary(three),
                          {"executive_summary": "The team met. The release moved.", "key_points": ["A"], "action_items": []})
-        self.assertIsNone(cleanup.parse_summary("Sure! Here is a summary of the meeting."))
+        self.assertIsNone(summary.parse_summary("Sure! Here is a summary of the meeting."))
+        self.assertIsNone(summary.parse_summary("## Key points\n- A")["action_items"])  # no such section
 
-    def test_undiarized_owner(self):
+    def test_summarize(self):
         answer = "## Key points\n- A\n## Action items\n- Speaker: email legal (today)\n- Priya: fix the bug (by Wednesday)"
-        ask = lambda requests: ["They met. Things happened." if "<notes>" in user else answer for _, user, _ in requests]
-        self.assertEqual(cleanup.Editor(ask).summarize(["x"], False)["action_items"],
-                         ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
-        self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["action_items"][0], "Speaker: email legal (today)")
-        self.assertEqual(cleanup.Editor(ask).summarize(["x"], True)["executive_summary"], "They met. Things happened.")
+        ask_many = lambda requests: ["They met. Things happened." if "<notes>" in user else answer for _, user, _ in requests]
+
+        result, problems = summary.summarize(ask_many, ["x"], diarized=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(result["action_items"], ["Speaker: email legal (today)", "Priya: fix the bug (by Wednesday)"])
+        self.assertEqual(result["executive_summary"], "They met. Things happened.")  # asked for separately
+
+        # Without speaker labels nobody is "Speaker"; the model sometimes says so anyway.
+        result, _ = summary.summarize(ask_many, ["x"], diarized=False)
+        self.assertEqual(result["action_items"], ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
+
+    def test_an_answer_cut_short_is_reported(self):
+        cut_short = lambda requests: ["Fine." if "<notes>" in user else "## Key points\n- A\n- B" for _, user, _ in requests]
+        result, problems = summary.summarize(cut_short, ["x"], diarized=True)
+        self.assertEqual((result["key_points"], result["action_items"]), (["A", "B"], []))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("no action items section", problems[0])
+
+        # Saying there are none is not the same as the section being missing.
+        none = lambda requests: ["Fine." if "<notes>" in user else "## Key points\n- A\n## Action items\n- None" for _, user, _ in requests]
+        self.assertEqual(summary.summarize(none, ["x"], diarized=True)[1], [])
+
+    def test_an_unreadable_answer_gives_no_summary(self):
+        result, problems = summary.summarize(lambda requests: ["I'm sorry, I can't help with that."], ["x"], diarized=True)
+        self.assertIsNone(result)
+        self.assertEqual(len(problems), 1)
 
     def test_empty_deadlines_are_dropped(self):
         def items(*lines):
-            return cleanup.parse_summary("## Action items\n" + "\n".join(f"- {line}" for line in lines))["action_items"]
+            return summary.parse_summary("## Action items\n" + "\n".join(f"- {line}" for line in lines))["action_items"]
 
         self.assertEqual(
             items(
@@ -230,8 +246,11 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(items(*kept), kept)
 
     def test_split_for_summary(self):
-        self.assertEqual(cleanup.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
-        self.assertEqual(cleanup.split_for_summary(["a b c d e"], max_words=2), ["a b", "c d", "e"])
+        self.assertEqual(summary.split_for_summary(["a b", "c d", "e"], max_words=4), ["a b\n\nc d", "e"])
+        self.assertEqual(summary.split_for_summary(["a b c d e"], max_words=2), ["a b", "c d", "e"])
+        # Every piece of one long turn says who is speaking, not just the first.
+        self.assertEqual(summary.split_for_summary(["Speaker 2: a b c d e"], max_words=2),
+                         ["Speaker 2: a b", "Speaker 2: c d", "Speaker 2: e"])
 
     def test_rendering(self):
         result = {**FormatsTest.result, "summary": {"key_points": ["Said bye."], "action_items": []}}
@@ -247,6 +266,14 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(formats.to_verbose_json(result)["summary"]["key_points"], ["Said bye."])
         self.assertEqual(formats.to_text_with_summary(FormatsTest.result), "Speaker 1: Bye.")
         self.assertNotIn("summary", formats.to_verbose_json(FormatsTest.result))
+
+    def test_warnings_travel_with_the_transcript(self):
+        result = {**FormatsTest.result, "warnings": ["Clean-up was skipped."]}
+        self.assertTrue(formats.to_text_with_summary(result).endswith("(Note: Clean-up was skipped.)"))
+        self.assertIn("*Note: Clean-up was skipped.*", formats.to_markdown(result))
+        self.assertEqual(formats.to_verbose_json(result)["warnings"], ["Clean-up was skipped."])
+        self.assertNotIn("warnings", formats.to_verbose_json(FormatsTest.result))
+
 
 
 if __name__ == "__main__":

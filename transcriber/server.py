@@ -16,13 +16,15 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import formats, multipart
 from .config import Config, parse_bool
-from .pipeline import Engine, Job, Options
+from .engine import Engine, QueueFull
+from .jobs import Job, Options
 
 STATIC_DIR = Path(__file__).parent / "static"
 SESSION_COOKIE = "transcriber_session"
 # What senko runs on macOS; it bundles these rather than taking a model name.
 DIARIZATION_MODEL = "senko (pyannote segmentation 3.0 + CAM++)"
-# Set by an authenticating reverse proxy. Trusted as-is: see README, "Privacy".
+# Set by an authenticating reverse proxy. Only believed when the
+# TRANSCRIBER_TRUST_USER_HEADER setting is on: see README, "Privacy and users".
 USER_HEADER = "X-Forwarded-User"
 
 # Model ids advertised on /v1/models. Clients that can't send extra form
@@ -73,13 +75,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Access-Control-Allow-Origin", "*")
+        if self.path.startswith("/v1/"):  # the Whisper-compatible API may be called from other sites' pages
+            self.send_header("Access-Control-Allow-Origin", "*")
         for key, value in (headers or {}).items():
             self.send_header(key, value)
-        if getattr(self, "_new_session", None):
-            cookie = f"{SESSION_COOKIE}={self._new_session}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict"
+        if self._new_cookie:
+            cookie = f"{SESSION_COOKIE}={self._new_cookie}; Path=/; Max-Age=31536000; HttpOnly; SameSite=Strict"
             self.send_header("Set-Cookie", cookie)
-            self._new_session = None
         if self.close_connection:
             self.send_header("Connection", "close")
         self.end_headers()
@@ -93,38 +95,43 @@ class Handler(BaseHTTPRequestHandler):
         # OpenAI's error envelope, so SDK clients surface the message.
         self._json(err.status, {"error": {"message": err.message, "type": err.kind, "param": None, "code": None}})
 
-    def _session(self) -> str:
-        """Who is asking; jobs are only ever listed or served to their uploader.
+    def _identity(self) -> str:
+        """Who is asking. Jobs are only ever listed or served to whoever uploaded them.
 
-        Behind an authenticating reverse proxy, that is the user it names in
-        X-Forwarded-User. Otherwise there are no accounts, and each browser
-        gets a random cookie on first contact.
+        Behind an authenticating reverse proxy (and with the setting that says
+        to believe it), that is the user named in X-Forwarded-User. Otherwise
+        there are no accounts, and each browser gets a random cookie on first
+        contact.
         """
         user = self._forwarded_user()
         if user:
-            return f"user:{user}"  # the colon keeps these apart from cookie tokens
-        if getattr(self, "_new_session", None):
-            return self._new_session
+            return f"user:{user}"  # the colon keeps these apart from cookie values
+        if self._new_cookie:
+            return self._new_cookie
         try:
             morsel = SimpleCookie(self.headers.get("Cookie", "")).get(SESSION_COOKIE)
         except Exception:  # noqa: BLE001 - malformed Cookie header
             morsel = None
         if morsel and re.fullmatch(r"[\w-]{32,64}", morsel.value):
             return morsel.value
-        self._new_session = secrets.token_urlsafe(32)
-        return self._new_session
+        self._new_cookie = secrets.token_urlsafe(32)  # sent with the response; see _send
+        return self._new_cookie
 
     def _forwarded_user(self) -> str | None:
+        if not self.config.trust_user_header:
+            return None
         return (self.headers.get(USER_HEADER) or "").strip() or None
 
     def _dispatch(self, routes):
-        self._new_session = None  # handler instances are reused across keep-alive requests
+        self._new_cookie = None  # one handler object serves every request on a kept-alive connection
         path = urlsplit(self.path).path.rstrip("/") or "/"
         try:
             for pattern, handler in routes:
                 m = re.fullmatch(pattern, path)
                 if m:
                     return handler(*m.groups())
+            if self.command == "POST":
+                self.close_connection = True  # its body was never read, so the connection can't be reused
             raise HTTPError(404, f"No route for {self.command} {path}")
         except HTTPError as err:
             self._error(err)
@@ -153,15 +160,20 @@ class Handler(BaseHTTPRequestHandler):
         self._dispatch([(r"/api/jobs/(\w+)", self.delete_job)])
 
     def do_OPTIONS(self):
+        """Browsers ask this before a cross-site call to the Whisper-compatible API."""
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
+        if self.path.startswith("/v1/"):
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
     def _read_upload(self):
         """Parse the multipart body; returns (fields, Upload for the `file` part)."""
+        if self.engine.queue_full():  # before reading, so a full queue costs no disk space
+            self.close_connection = True
+            raise HTTPError(503, "The queue is full. Try again when some jobs have finished.", "server_error")
         length = self.headers.get("Content-Length")
         if length is None or not length.isdigit():
             self.close_connection = True
@@ -175,7 +187,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.rfile,
                 self.headers.get("Content-Type", ""),
                 int(length),
-                self.config.work_dir,
+                self.engine.files_dir,
                 self.config.max_upload_bytes,
             )
         except multipart.MultipartError as exc:
@@ -190,8 +202,15 @@ class Handler(BaseHTTPRequestHandler):
             raise HTTPError(400, "Missing `file` form field")
         return fields, upload
 
+    def _submit(self, upload, options: Options, owner: str | None = None) -> Job:
+        try:
+            return self.engine.submit(upload.filename, upload.path, options, owner)
+        except QueueFull:  # it filled up while this upload was arriving
+            upload.path.unlink(missing_ok=True)
+            raise HTTPError(503, "The queue is full. Try again when some jobs have finished.", "server_error") from None
+
     def _job_or_404(self, job_id: str) -> Job:
-        job = self.engine.get(job_id, self._session())
+        job = self.engine.get(job_id, self._identity())
         if job is None:  # also the answer for someone else's job
             raise HTTPError(404, "No such job")
         return job
@@ -199,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
     # --------------------------------------------------------------- routes
 
     def get_index(self):
-        self._session()
+        self._identity()  # so a first-time visitor gets their cookie with the page
         self._send(200, (STATIC_DIR / "index.html").read_bytes(), "text/html; charset=utf-8")
 
     def get_health(self):
@@ -210,7 +229,7 @@ class Handler(BaseHTTPRequestHandler):
             "error": engine.load_error,
             "asr_model": self.config.asr_model,
             "diarization_model": DIARIZATION_MODEL,
-            "cleanup_model": self.config.cleanup_model,
+            "llm_model": self.config.llm_model,
             **engine.stats(),
         })  # fmt: skip
 
@@ -242,7 +261,7 @@ class Handler(BaseHTTPRequestHandler):
         granularities = fields.get("timestamp_granularities[]", []) + fields.get("timestamp_granularities", [])
         granularities = {g.strip() for value in granularities for g in value.split(",")}
 
-        job = self.engine.submit(upload.filename, upload.path, options)
+        job = self._submit(upload, options)
         job.done.wait()
         if job.status == "error":
             if job.user_error:
@@ -251,8 +270,7 @@ class Handler(BaseHTTPRequestHandler):
 
         result = job.result
         if response_format == "json":
-            summary = {"summary": result["summary"]} if result["summary"] else {}
-            self._json(200, {"text": formats.to_text(result), **summary})
+            self._json(200, {"text": formats.to_text(result), **formats.extras(result)})
         elif response_format == "verbose_json":
             payload = formats.to_verbose_json(
                 result,
@@ -276,17 +294,17 @@ class Handler(BaseHTTPRequestHandler):
             cleanup=parse_bool(fields.get("cleanup", [None])[-1]),
             summary=parse_bool(fields.get("summary", [None])[-1]),
         )
-        job = self.engine.submit(upload.filename, upload.path, options, owner=self._session())
-        self._json(202, self.engine.summary(job))
+        job = self._submit(upload, options, owner=self._identity())
+        self._json(202, self.engine.job_status(job))
 
     def get_jobs(self):
-        jobs = [self.engine.summary(job) for job in self.engine.list_jobs(self._session())]
+        jobs = [self.engine.job_status(job) for job in self.engine.list_jobs(self._identity())]
         self._json(200, {"user": self._forwarded_user(), "jobs": jobs})
 
     def get_job(self, job_id):
         job = self._job_or_404(job_id)
-        payload = self.engine.summary(job)
-        if job.result:
+        payload = self.engine.job_status(job)
+        if job.result:  # what the page shows; timestamps and words are only in the downloads
             payload["result"] = {key: job.result[key] for key in ("diarized", "cleaned", "speakers", "turns", "summary")}
         self._json(200, payload)
 
@@ -304,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_job(self, job_id):
         self._job_or_404(job_id)
-        if not self.engine.delete(job_id, self._session()):
+        if not self.engine.delete(job_id, self._identity()):
             raise HTTPError(409, "Job is still running")
         self._json(200, {"deleted": job_id})
 

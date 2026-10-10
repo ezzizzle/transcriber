@@ -55,6 +55,7 @@
   .tag { font-size: 12px; padding: 1px 8px; border-radius: 99px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
   .job-status { flex-basis: 100%; color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
   .job.error .job-status { color: var(--danger); }
+  .job-notice { flex-basis: 100%; color: var(--danger); font-size: 13px; }
   .job-status button { border: 0; padding: 0 2px; margin-left: 8px; color: var(--accent); font-size: 13px; }
   .job-status button::after { content: " ▸"; }
   .job-status button[aria-expanded="true"]::after { content: " ▾"; }
@@ -195,12 +196,13 @@ function makeRow(id) {
   row.statusLine = el("div", { className: "job-status" }, row.status, row.timingsBtn);
   row.timingsTable = el("table", { className: "job-timings" });
   row.timings = el("div", { className: "job-timings-wrap", hidden: true }, row.timingsTable);
+  row.notice = el("div", { className: "job-notice", hidden: true });  // warnings, and things that went wrong
   row.barFill = el("i");
   row.bar = el("div", { className: "bar" }, row.barFill);
   row.actions = el("div", { className: "actions" });
   row.transcript = el("div", { className: "transcript", hidden: true });
   row.root = el("div", { className: "job card" },
-    el("div", { className: "job-head" }, row.name, row.tags, row.statusLine, row.timings, row.bar, row.actions),
+    el("div", { className: "job-head" }, row.name, row.tags, row.statusLine, row.notice, row.timings, row.bar, row.actions),
     row.transcript);
   return row;
 }
@@ -239,6 +241,20 @@ function showTimings(row, timings) {
   }));
 }
 
+function showNotice(row, message) {
+  row.notice.textContent = message;
+  row.notice.hidden = !message;
+}
+
+// Runs a button's action, and says so on the job's card if it fails.
+async function attempt(row, action) {
+  try {
+    await action();
+  } catch (err) {
+    showNotice(row, err.message || "Something went wrong.");
+  }
+}
+
 function toggleTimings(row) {
   row.timings.hidden = !row.timings.hidden;
   row.timingsBtn.setAttribute("aria-expanded", String(!row.timings.hidden));
@@ -246,7 +262,6 @@ function toggleTimings(row) {
 
 function updateJob(row, job) {
   setCommon(row, job.filename, job.diarize, job.cleanup, job.summarize);
-  row.summarize = job.summarize;
   row.root.classList.toggle("error", job.status === "error");
   const active = job.status === "queued" || job.status === "processing";
   setBar(row, job.status === "queued" ? 0 : job.progress, active);
@@ -265,11 +280,12 @@ function updateJob(row, job) {
   if (row.state === job.status) return;
   row.state = job.status;
   showTimings(row, job.timings);
+  showNotice(row, job.warnings.join(" "));
   row.actions.replaceChildren();
   if (job.status === "done") {
-    row.viewBtn = el("button", { className: "primary", textContent: "View", onclick: () => toggle(row) });
+    row.viewBtn = el("button", { className: "primary", textContent: "View", onclick: () => attempt(row, () => toggle(row)) });
     row.actions.append(row.viewBtn,
-      el("button", { textContent: "Copy", onclick: (e) => copy(row, e.target) }),
+      el("button", { textContent: "Copy", onclick: (e) => attempt(row, () => copy(row, e.target)) }),
       el("label", { textContent: "Download" }));
     for (const fmt of ["txt", "md", "srt", "vtt", "json"])
       row.actions.append(el("a", { className: "btn", textContent: fmt.toUpperCase(),
@@ -277,7 +293,7 @@ function updateJob(row, job) {
   }
   if (!active) {
     row.actions.append(el("span", { className: "spacer" }),
-      el("button", { className: "quiet", textContent: "Remove", onclick: () => remove(row) }));
+      el("button", { className: "quiet", textContent: "Remove", onclick: () => attempt(row, () => remove(row)) }));
   }
 }
 
@@ -294,7 +310,7 @@ function summarySections(result) {
 async function loadTranscript(row) {
   if (row.loaded) return row.result;
   const res = await fetch(`/api/jobs/${row.id}`);
-  if (!res.ok) throw new Error("Transcript is no longer available");
+  if (!res.ok) throw new Error("This transcript is no longer available.");
   row.result = (await res.json()).result;
   const speakers = row.result.speakers;
   row.transcript.replaceChildren(...row.result.turns.map((turn) => {
@@ -318,17 +334,14 @@ async function loadTranscript(row) {
         : el("ul", {}, ...body.map((b) => el("li", { textContent: b }))));
     box.append(el("small", { textContent: SUMMARY_NOTE }));
     row.transcript.append(box);
-  } else if (row.summarize && row.result.turns.length) {
-    row.transcript.append(el("div", { className: "summary" },
-      el("small", { textContent: "The summary could not be generated for this transcript." })));
   }
   row.loaded = true;
   return row.result;
 }
 
 async function toggle(row) {
+  if (!row.open) await loadTranscript(row);
   row.open = !row.open;
-  if (row.open) await loadTranscript(row);
   row.transcript.hidden = !row.open;
   row.viewBtn.textContent = row.open ? "Hide" : "View";
 }
@@ -346,7 +359,10 @@ async function copy(row, button) {
 
 async function remove(row) {
   if (uploads.has(row.id)) uploads.delete(row.id);
-  else await fetch(`/api/jobs/${row.id}`, { method: "DELETE" });
+  else {
+    const res = await fetch(`/api/jobs/${row.id}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 404) throw new Error("This transcript could not be removed.");
+  }
   refresh();
 }
 
@@ -363,7 +379,7 @@ function render(jobs) {
       : `Uploading ${up.total ? Math.round(100 * up.loaded / up.total) : 0}%`;
     if (up.error && !row.actions.childElementCount)
       row.actions.append(el("span", { className: "spacer" }),
-        el("button", { className: "quiet", textContent: "Remove", onclick: () => remove(row) }));
+        el("button", { className: "quiet", textContent: "Remove", onclick: () => attempt(row, () => remove(row)) }));
     wanted.push(row);
   }
   for (const job of jobs) {
@@ -383,14 +399,16 @@ async function refresh() {
   clearTimeout(timer);
   let delay = 5000;
   try {
-    const data = await (await fetch("/api/jobs")).json();
+    const res = await fetch("/api/jobs");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
     lastJobs = data.jobs;
     $("user").textContent = data.user ?? "";
     $("privacy").textContent = data.user
       ? `Transcripts are only visible to you (${data.user}),`
       : "Transcripts are only visible from the browser that uploaded them,";
     if (lastJobs.some((j) => j.status === "queued" || j.status === "processing")) delay = 1000;
-  } catch { /* server restarting; keep showing what we have */ }
+  } catch { /* server restarting or erroring; keep showing what we have */ }
   render(lastJobs);
   timer = setTimeout(refresh, delay);
 }
@@ -439,7 +457,7 @@ async function health() {
     node.textContent = { ok: "Ready", loading: "Loading speech model…", error: data.error }[data.status];
     $("model-asr").textContent = data.asr_model;
     $("model-diarization").textContent = data.diarization_model;
-    $("model-llm").textContent = data.cleanup_model;
+    $("model-llm").textContent = data.llm_model;
     if (data.status === "loading") setTimeout(health, 2000);
   } catch {
     node.className = "error";
