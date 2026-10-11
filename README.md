@@ -219,8 +219,11 @@ original alongside:
   filler sounds it removed are greyed and struck through, other words it
   removed are struck through in red, and words it added or changed are
   highlighted. Capitals and punctuation are not compared.
-- The JSON download has both versions: `text` and `raw_text` for the whole
-  transcript, and the same pair on every turn.
+- The JSON download has three versions, for the whole transcript and again on
+  every turn: `text` as cleaned up, `raw_text` as transcribed, and `changes`.
+  `changes` is the cleaned-up text written in Markdown for a person to read,
+  with the words clean-up took out ~~struck through~~ and the words it put in
+  in **bold**.
 - The API's JSON formats give the cleaned-up `text`; their `segments` and
   `words` are always the raw transcription.
 

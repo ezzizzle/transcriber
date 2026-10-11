@@ -1,5 +1,6 @@
 """Everything that only handles text: building the transcript, clean-up, the summary, and the output formats."""
 
+import json
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -215,6 +216,30 @@ class CompareTest(unittest.TestCase):
             ["removed", "not"],  # and this is the kind of thing the comparison is for
             ["same", "work on Android."],
         ])  # fmt: skip
+
+    def test_changes_as_markdown(self):
+        raw = "um so we we shipped it on the fourteenth. it does not work on android"
+        cleaned = "So, we shipped it on the 14th.\n\nIt does work on Android."
+        self.assertEqual(
+            compare.as_markdown(raw, cleaned),
+            "~~um~~ So, ~~we~~ we shipped it on the ~~fourteenth.~~ **14th.**\n\nIt does ~~not~~ work on Android.",
+        )
+        self.assertEqual(compare.as_markdown("Thanks, all.", "Thanks, all."), "Thanks, all.")
+        # A star that was really in the text is not mistaken for a mark.
+        self.assertEqual(compare.as_markdown("um press * twice", "Press * twice."), "~~um~~ Press \\* twice.")
+
+    def test_the_json_download_carries_all_three_versions(self):
+        turn = {"speaker": "Speaker 1", "start": 0.0, "end": 2.0, "text": "So, hello.", "raw_text": "um so hello"}
+        result = {"diarized": True, "cleaned": True, "turns": [turn]}
+        whole = json.loads(formats.to_full_json(result))
+        self.assertEqual(whole["text"], "Speaker 1: So, hello.")
+        self.assertEqual(whole["raw_text"], "Speaker 1: um so hello")
+        self.assertEqual(whole["changes"], "Speaker 1: ~~um~~ So, hello.")
+        self.assertEqual(whole["turns"][0]["changes"], "~~um~~ So, hello.")
+        self.assertNotIn("changes", turn)  # worked out for the download, not stored with the job
+
+        plain = json.loads(formats.to_full_json({"diarized": False, "cleaned": False, "turns": [{"speaker": None, "text": "um so hello"}]}))
+        self.assertEqual(sorted(plain), ["cleaned", "diarized", "text", "turns"])
 
     def test_nothing_changed(self):
         self.assertEqual(compare.changes("Thanks, all.", "Thanks, all."), [["same", "Thanks, all."]])

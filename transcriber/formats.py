@@ -24,6 +24,8 @@ is the same turn as transcribed.
 import json
 import math
 
+from . import compare
+
 
 def timestamp(seconds: float, ms_sep: str = ".") -> str:
     ms = max(0, round(seconds * 1000))
@@ -185,10 +187,15 @@ def to_diarized_json(result: dict) -> dict:
 def to_full_json(result: dict) -> str:
     """Everything we know, for the web UI's JSON download.
 
-    A cleaned-up transcript is there twice, both whole and turn by turn:
-    `text` as cleaned and `raw_text` as transcribed.
+    A cleaned-up transcript is there three times, both whole and turn by turn:
+    `text` as cleaned, `raw_text` as transcribed, and `changes`, which is the
+    cleaned text in Markdown with what clean-up ~~took out~~ and **put in**,
+    for a person who wants to check it.
     """
     whole = {"text": to_text(result)}
     if result.get("cleaned"):
+        turns = [{**turn, "changes": compare.as_markdown(turn["raw_text"], turn["text"])} for turn in result["turns"]]
+        result = {**result, "turns": turns}
         whole["raw_text"] = to_text(result, "raw_text")
+        whole["changes"] = to_text(result, "changes")
     return json.dumps({**whole, **result}, indent=2, ensure_ascii=False) + "\n"

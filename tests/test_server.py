@@ -109,6 +109,8 @@ class ServerTest(unittest.TestCase):
 
         _, whole = browser.get(f"/api/jobs/{job['id']}/download?format=json")
         self.assertEqual((whole["text"], whole["raw_text"]), ("so we shipped it", "um so um we shipped it"))
+        self.assertEqual(whole["changes"], "~~um~~ so ~~um~~ we shipped it")
+        self.assertEqual(whole["turns"][0]["changes"], "~~um~~ so ~~um~~ we shipped it")
 
         # Nothing to compare when clean-up wasn't asked for, and nobody else may look.
         plain = browser.upload_and_wait("um hello")

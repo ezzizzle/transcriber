@@ -96,8 +96,9 @@ A finished job's result is a plain dict, documented at the top of
   `Answer.cut_off` wherever the model's output is treated as a full list.
 - **Keep the original next to the cleaned text.** Each turn of a cleaned
   transcript carries `raw_text`, and `compare.changes` is how a person checks
-  the model's work. Nothing automatic can tell a fixed typo from a changed
-  name.
+  the model's work: the page's "Show changes" and the `changes` Markdown in
+  the JSON download are both made from it. Nothing automatic can tell a fixed
+  typo from a changed name.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

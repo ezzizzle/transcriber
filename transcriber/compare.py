@@ -61,6 +61,27 @@ def changes(raw: str, cleaned: str) -> list[list[str]]:
     return pieces
 
 
+def as_markdown(raw: str, cleaned: str) -> str:
+    """The cleaned text of a turn as Markdown, marked with what clean-up changed.
+
+    Words it took out are ~~struck through~~ and words it put in are **bold**,
+    so the result reads sensibly as plain text and shows up properly anywhere
+    that displays Markdown.
+    """
+    paragraphs: list[list[str]] = [[]]
+    for kind, text in changes(raw, cleaned):
+        text = re.sub(r"([*~])", r"\\\1", text)  # so a * or ~ that was actually said isn't taken for a mark
+        if kind == "break":
+            paragraphs.append([])
+        elif kind == "same":
+            paragraphs[-1].append(text)
+        elif kind == "added":
+            paragraphs[-1].append(f"**{text}**")
+        else:  # a filler or another removed word
+            paragraphs[-1].append(f"~~{text}~~")
+    return "\n\n".join(" ".join(paragraph) for paragraph in paragraphs)
+
+
 def _letters(word: str) -> str:
     """A word as it is compared: lower case, with punctuation stripped."""
     return re.sub(r"\W", "", word.lower())
