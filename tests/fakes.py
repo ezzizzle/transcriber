@@ -52,6 +52,19 @@ def worker(conn, config, preload):
         )))  # fmt: skip
 
 
+def worker_that_cannot_load_its_model(conn, config, preload):
+    """Reports a failed model load at startup, then works: the trouble has passed by the first job."""
+    if preload:
+        conn.send(("ready", "Could not load speech model: the network is down"))
+    worker(conn, config, preload=False)
+
+
+def worker_that_hangs_at_startup(conn, config, preload):
+    if preload:
+        time.sleep(3600)
+    worker(conn, config, preload=False)
+
+
 def llm(conn, model_id):
     conn.send(("ready", None))
     while True:

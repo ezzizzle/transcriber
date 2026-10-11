@@ -63,12 +63,12 @@ class Browser:
 
 
 class ServerTest(unittest.TestCase):
-    def serve(self, **settings) -> int:
+    def serve(self, worker=fakes.worker, **settings) -> int:
         """Start a server on a free port and return the port."""
         work_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(Handler, "log_message", lambda *args: None))  # keep the test output quiet
         config = Config(host="127.0.0.1", port=0, work_dir=work_dir, max_parallel=1, **settings)
-        engine = Engine(config, worker_main=fakes.worker, llm_main=fakes.llm)
+        engine = Engine(config, worker_main=worker, llm_main=fakes.llm)
         server = Server(config, engine)
         engine.start()
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -155,6 +155,14 @@ class ServerTest(unittest.TestCase):
     def test_health(self):
         status, health = Browser(self.serve()).get("/health")
         self.assertEqual((status, health["status"], health["queued"]), (200, "ok", 0))
+
+    def test_health_recovers_once_a_job_has_worked(self):
+        browser = Browser(self.serve(worker=fakes.worker_that_cannot_load_its_model))
+        status, health = browser.get("/health")
+        self.assertEqual((status, health["status"]), (503, "error"))
+        self.assertIn("the network is down", health["error"])
+        browser.upload_and_wait("hello there")
+        self.assertEqual(browser.get("/health")[1]["status"], "ok")
 
 
 if __name__ == "__main__":

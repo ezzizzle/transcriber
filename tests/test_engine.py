@@ -15,10 +15,10 @@ from transcriber.jobs import Job, Options
 
 
 class EngineTest(unittest.TestCase):
-    def engine(self, llm=fakes.llm, **settings) -> Engine:
+    def engine(self, worker=fakes.worker, llm=fakes.llm, **settings) -> Engine:
         work_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         settings = {"max_parallel": 1, "stall_seconds": 30, **settings}
-        engine = Engine(Config(work_dir=work_dir, **settings), worker_main=fakes.worker, llm_main=llm)
+        engine = Engine(Config(work_dir=work_dir, **settings), worker_main=worker, llm_main=llm)
         engine.start()
         self.assertTrue(engine.ready.wait(20))
         return engine
@@ -106,6 +106,19 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(job.status, "done")
         self.assertEqual(engine.stats()["running"], 0)
         self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+
+    def test_a_speech_model_that_fails_to_load_is_reported_until_a_job_works(self):
+        engine = self.engine(worker=fakes.worker_that_cannot_load_its_model)
+        self.assertIn("the network is down", engine.load_error)
+        self.assertEqual(self.finish(self.submit(engine, "hello there")).status, "done")
+        self.assertIsNone(engine.load_error)
+
+    def test_a_speech_model_that_never_loads_does_not_hold_up_the_queue(self):
+        with mock.patch.object(engine_module, "_SPEECH_LOAD_TIMEOUT", 1):
+            engine = self.engine(worker=fakes.worker_that_hangs_at_startup)
+        self.assertIn("did not finish loading", engine.load_error)
+        self.assertEqual(self.finish(self.submit(engine, "hello there")).status, "done")
+        self.assertIsNone(engine.load_error)
 
     def test_the_language_model_is_reached_through_the_engine(self):
         engine = self.engine()

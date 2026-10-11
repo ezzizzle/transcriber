@@ -136,6 +136,9 @@ nobody waiting behind a long file, not about total throughput.
   can't be loaded: the transcript is still returned, with a warning saying what
   is missing. Warnings show on the job in the web UI, at the end of the TXT and
   Markdown downloads, and as `warnings` in the JSON formats.
+- **The speech model fails to load at startup**, or takes more than an hour:
+  `/health` reports the error and the server carries on. Each job then tries to
+  load it again, and the error clears as soon as one succeeds.
 - **Anything unexpected** while starting or finishing a job: that job fails
   with the reason, and the slot goes on to the next one.
 

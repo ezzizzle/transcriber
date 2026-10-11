@@ -26,6 +26,10 @@ from .llm import LanguageModelError, SharedLLM, llm_main
 from .worker import worker_main
 
 
+# Loading the speech model can include a multi-gigabyte download the first time.
+_SPEECH_LOAD_TIMEOUT = 3600.0
+
+
 class QueueFull(Exception):
     """Too many uploads are already waiting."""
 
@@ -58,8 +62,8 @@ class Engine:
         self._idle_slots: set[int] = set()
         self._running = 0
 
-        self.ready = threading.Event()  # set once the first worker has loaded the speech model
-        self.load_error: str | None = None
+        self.ready = threading.Event()  # set once the first worker has started, with or without its model
+        self.load_error: str | None = None  # why the speech model isn't loaded, until a job shows that it is
         self.files_dir = _private_dir(config.work_dir)  # uploads and decoded audio, while their job is alive
 
     def start(self):
@@ -118,17 +122,7 @@ class Engine:
 
     def _slot(self, slot: int):
         """One thread per worker process: start it, feed it jobs, replace it if it breaks."""
-        worker = None
-        if slot == 0:
-            # The first worker stays for the life of the server, and loads
-            # (downloading if need be) the speech model before the first upload.
-            worker = Worker(self._mp, self._worker_main, self.config, slot, preload=True)
-            try:
-                _, self.load_error = worker.conn.recv()
-            except EOFError:
-                self.load_error = "The speech model worker exited during startup."
-            self.ready.set()
-
+        worker = self._first_worker() if slot == 0 else None
         while True:
             job = self._next_job(slot, may_give_up=worker is not None and slot > 0)
             if job is None:
@@ -148,6 +142,28 @@ class Engine:
             if not worker_is_fine and worker is not None:
                 worker.stop()
                 worker = None
+
+    def _first_worker(self) -> Worker | None:
+        """Start the worker that stays for the life of the server, and wait for it to load the speech model.
+
+        Loading here (downloading if need be) means the first upload doesn't
+        have to wait for it. If it fails, `load_error` says why and the server
+        carries on: every job then tries again with a worker of its own.
+        """
+        worker = None
+        try:
+            worker = Worker(self._mp, self._worker_main, self.config, slot=0, preload=True)
+            if not worker.conn.poll(_SPEECH_LOAD_TIMEOUT):
+                raise TimeoutError(f"it did not finish loading within {_SPEECH_LOAD_TIMEOUT / 60:.0f} minutes")
+            _, self.load_error = worker.conn.recv()
+        except Exception as exc:  # noqa: BLE001 - not started, exited, or stuck
+            reason = "its process exited" if isinstance(exc, EOFError) else str(exc)
+            self.load_error = f"Could not load the speech model: {reason}."
+            if worker is not None:
+                worker.stop()
+                worker = None
+        self.ready.set()
+        return worker
 
     def _next_job(self, slot: int, may_give_up: bool) -> Job | None:
         """Wait for a job. With `may_give_up`, returns None after `idle_unload_seconds` without one."""
@@ -186,6 +202,7 @@ class Engine:
                 elif kind == "done":
                     job.result = payload[0]
                     job.status, job.stage, job.progress = "done", "Done", None
+                    self.load_error = None  # a finished job proves the speech model loads, whatever happened at startup
                     return True
                 else:
                     job.status, job.error, job.user_error = "error", *payload
