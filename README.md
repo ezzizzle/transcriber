@@ -112,16 +112,30 @@ can add up to more than the total. The same figures are in `GET /api/jobs` as
 Up to `TRANSCRIBER_MAX_PARALLEL` jobs are processed at once; the rest wait in a
 first-come-first-served queue, and the web UI shows each waiting job's place in
 line. API requests share the same queue and simply block until their turn.
+At most `TRANSCRIBER_MAX_QUEUE` uploads may wait; beyond that, new uploads are
+turned away with a 503 until the queue drains.
 
 Each parallel job runs in its own worker process with its own speech and
 diarization models, so every extra slot costs memory (see
 [Resource use](#resource-use)). The language model is loaded once, in a process
 of its own, and shared: transcription and speaker identification run fully in
 parallel, while clean-up and summary requests from different jobs take turns.
-The default is 1 slot on a 16 GB Mac, 2 on 24 GB, 3 on 32 GB, at most 4. The first worker stays
-loaded; extra workers exit after 10 idle minutes to give their memory back.
+The default is 1 slot on a 16 GB Mac, 2 on 24 GB, 3 on 32 GB, at most 4. The
+first worker stays loaded; extra workers and the language model exit after 10
+idle minutes to give their memory back, and start again when next needed.
 All workers share one GPU, so parallel jobs each run slower: this is about
 nobody waiting behind a long file, not about total throughput.
+
+### When something goes wrong
+
+- **A worker crashes** on a file: that job fails, a fresh worker is started, and
+  other jobs carry on.
+- **Something stops responding** (a worker, the language model, ffmpeg) for
+  `TRANSCRIBER_STALL_SECONDS`: it is killed and replaced.
+- **Clean-up or the summary fails**, for example because the language model
+  can't be loaded: the transcript is still returned, with a warning saying what
+  is missing. Warnings show on the job in the web UI, at the end of the TXT and
+  Markdown downloads, and as `warnings` in the JSON formats.
 
 ## API
 
@@ -186,7 +200,7 @@ to the model, since a pattern can't tell when they carry meaning.
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
-transcript and writes three sections: an Executive Summary of two sentences,
+transcript and writes three sections: an Executive Summary of a few sentences,
 Key Points, and Action Items. The executive summary is written last, from the
 key points, in a short step of its own. They are appended below the transcript
 in `text` responses and in the TXT and Markdown downloads, and returned as a
@@ -211,37 +225,45 @@ Environment variables, all optional:
 |---|---|---|
 | `TRANSCRIBER_HOST` / `TRANSCRIBER_PORT` | `127.0.0.1` / `8000` | |
 | `TRANSCRIBER_ASR_MODEL` | `mlx-community/parakeet-tdt-0.6b-v3` | any parakeet-mlx model |
-| `TRANSCRIBER_CLEANUP_MODEL` | `mlx-community/Qwen3.5-9B-MLX-4bit` | any mlx-lm chat model; used for clean-up and summaries |
+| `TRANSCRIBER_LLM_MODEL` | `mlx-community/Qwen3.5-9B-MLX-4bit` | any mlx-lm chat model; used for clean-up and summaries. The old name, `TRANSCRIBER_CLEANUP_MODEL`, still works |
+| `TRANSCRIBER_TRUST_USER_HEADER` | `false` | believe `X-Forwarded-User`; see [Privacy and users](#privacy-and-users) |
 | `TRANSCRIBER_DEFAULT_DIARIZE` / `_CLEANUP` / `_SUMMARY` | `false` | API defaults when the request doesn't say |
 | `TRANSCRIBER_CLEANUP_BATCH` | `4` | clean-up passages sent through the language model at once; `1` disables batching |
 | `TRANSCRIBER_MAX_PARALLEL` | 1 at 16 GB, 2 at 24 GB, max 4 | jobs processed at once |
-| `TRANSCRIBER_IDLE_UNLOAD_SECONDS` | `600` | idle time before extra workers exit |
+| `TRANSCRIBER_MAX_QUEUE` | `20` | uploads allowed to wait for a free worker |
+| `TRANSCRIBER_IDLE_UNLOAD_SECONDS` | `600` | idle time before extra workers and the language model exit |
+| `TRANSCRIBER_STALL_SECONDS` | `900` | silence after which a worker, the language model or ffmpeg is taken to be stuck |
 | `TRANSCRIBER_CHUNK_SECONDS` | `120` | transcription window; lower it to reduce peak memory |
 | `TRANSCRIBER_MAX_UPLOAD_MB` | `4096` | |
-| `TRANSCRIBER_MAX_JOBS` | `50` | finished web UI transcripts kept in memory |
-| `TRANSCRIBER_WORK_DIR` | `$TMPDIR/transcriber` | uploads live here only while being processed |
+| `TRANSCRIBER_MAX_JOBS` | `50` | finished web UI transcripts kept in memory, per user |
+| `TRANSCRIBER_WORK_DIR` | `$TMPDIR/transcriber` | uploads and decoded audio live here only while being processed |
 
 ## Privacy and users
 
 Web UI transcripts are listed and served only to whoever uploaded them. Who
 that is gets decided per request:
 
-1. If the request has an `X-Forwarded-User` header, that value is the user.
-   This is for running behind a reverse proxy that authenticates people
-   (oauth2-proxy, Authelia, Caddy `forward_auth`, ...). Users see their
-   transcripts from any browser.
+1. With `TRANSCRIBER_TRUST_USER_HEADER=true`, a request's `X-Forwarded-User`
+   header names the user. This is for running behind a reverse proxy that
+   authenticates people (oauth2-proxy, Authelia, Caddy `forward_auth`, ...).
+   Users see their transcripts from any browser.
 2. Otherwise a random session cookie identifies the browser. There are no
    accounts in this mode, so clearing cookies or switching browsers loses access.
 
-The header is trusted as-is. If you rely on it, the proxy must be the only way
-to reach the server (keep the default `127.0.0.1` bind, or firewall the port)
-and must overwrite any `X-Forwarded-User` sent by the client. Anyone who can
-reach the port directly can otherwise claim to be any user.
+The header is believed as-is, which is why it is off unless you turn it on.
+Only do so when the proxy is the only way to reach the server (keep the default
+`127.0.0.1` bind, or firewall the port) and it overwrites any
+`X-Forwarded-User` sent by the client. Otherwise anyone who can reach the port
+can claim to be any user.
 
 Also worth knowing:
 
 - Transcripts live in memory only and are gone when the server restarts.
-  Uploaded media is deleted as soon as its job finishes.
+- Uploaded media and the audio decoded from it are deleted as soon as their job
+  finishes, including when the job fails or its worker crashes. If the server
+  itself is killed mid-job, the next one to start removes what was left behind.
+- Each user keeps their newest `TRANSCRIBER_MAX_JOBS` transcripts; one user's
+  uploads never push out another's.
 - API calls return their result in the response and are not kept at all.
 - The server does no authentication itself and speaks plain HTTP; without a
   proxy in front, anyone who can reach the port can submit audio.
@@ -277,23 +299,49 @@ cleaned up text about twice as fast (44 against 23 words per second) and removed
 fillers at least as well, but its summaries contained factual slips that the
 default model did not make: a cost read as a travel time, a request attributed
 to the wrong person, an action item nobody had agreed to. Select it with
-`TRANSCRIBER_CLEANUP_MODEL`.
+`TRANSCRIBER_LLM_MODEL`.
 
 ## Layout
 
 ```
 transcriber/
   __main__.py     entry point
-  server.py       HTTP routes (stdlib http.server)
+  config.py       settings, read from TRANSCRIBER_* environment variables
+  server.py       HTTP routes (stdlib http.server); who is asking
   multipart.py    streaming upload parser
-  pipeline.py     ffmpeg → parakeet → senko → merge; job queue and worker processes
-  cleanup.py      LLM clean-up pass
+  engine.py       the job queue, and the worker processes that drain it
+  jobs.py         what a job is: its options and its state
+  worker.py       a worker process: one recording through the whole pipeline
+  audio.py        ffmpeg: decoding, and finding pauses
+  transcript.py   sentences, speakers and turns; builds the result
+  cleanup.py      clean-up: fillers, passages, paragraphs
+  summary.py      executive summary, key points, action items
+  prompts.py      the instructions given to the language model
+  llm.py          the language model's process, and the server's handle on it
   formats.py      text / Markdown / SRT / VTT / JSON renderers
   static/index.html
-tests/            uv run python -m unittest
+tests/            fast, no models needed
+evals/            checks on the real language model's output
 ```
 
 The only Python dependencies are `parakeet-mlx`, `senko` and `mlx-lm`.
+
+## Development
+
+```bash
+uv run python -m unittest
+```
+
+runs in about ten seconds and needs no models: the queue and the HTTP routes
+are tested against stand-in worker processes (`tests/fakes.py`).
+
+```bash
+uv run python -m evals.run
+```
+
+loads the real language model and checks its clean-up and summaries against
+transcripts with known answers. Run it after changing a prompt or the model;
+pass a model name to try a different one.
 
 ## Known limits
 

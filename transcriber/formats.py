@@ -9,8 +9,11 @@ A result is a plain dict:
       "words":    [{"word", "start", "end", "speaker"|None}],
       "turns":    [{"speaker"|None, "start", "end", "text"}],
       "summary":  {"executive_summary": str, "key_points": [str], "action_items": [str]} | None,
-      "timings":  {stage: seconds},  # worker-side stages; see pipeline.STAGE_KEYS
+      "warnings": [str],             # optional stages that failed or may be incomplete
+      "timings":  {stage: seconds},  # see jobs.STAGE_KEYS
     }
+
+It is built in transcript.to_result.
 
 Segments and words always carry the raw transcription (they have timestamps).
 Turns are consecutive segments by one speaker; their text is what the cleanup
@@ -41,6 +44,16 @@ def to_text(result: dict) -> str:
     if not result["diarized"]:
         return "\n\n".join(t["text"] for t in result["turns"])
     return "\n\n".join(f"{t['speaker']}: {t['text']}" for t in result["turns"])
+
+
+def extras(result: dict) -> dict:
+    """The parts of a result that the JSON formats carry alongside OpenAI's own fields."""
+    out = {}
+    if result.get("summary"):
+        out["summary"] = result["summary"]
+    if result.get("warnings"):
+        out["warnings"] = result["warnings"]
+    return out
 
 
 SUMMARY_NOTE = "Machine-generated summary. Check it against the transcript before relying on it."
@@ -75,6 +88,7 @@ def to_text_with_summary(result: dict) -> str:
     if len(out) > 1:
         out.insert(1, "-" * 40)
         out.append(f"({SUMMARY_NOTE})")
+    out += [f"(Note: {warning})" for warning in result.get("warnings", [])]
     return "\n\n".join(out)
 
 
@@ -88,6 +102,8 @@ def to_markdown(result: dict, title: str = "Transcript") -> str:
         out += [f"## {heading}", "", body, ""]
     if result.get("summary"):
         out += [f"*{SUMMARY_NOTE}*", ""]
+    for warning in result.get("warnings", []):
+        out += [f"*Note: {warning}*", ""]
     return "\n".join(out).rstrip() + "\n"
 
 
@@ -114,9 +130,8 @@ def to_verbose_json(result: dict, words: bool = False, segments: bool = True) ->
         "language": result["language"],
         "duration": result["duration"],
         "text": to_text(result),
+        **extras(result),
     }
-    if result.get("summary"):
-        out["summary"] = result["summary"]
     if segments:
         out["segments"] = [
             {
@@ -147,7 +162,7 @@ def to_diarized_json(result: dict) -> dict:
         "task": "transcribe",
         "duration": result["duration"],
         "text": to_text(result),
-        **({"summary": result["summary"]} if result.get("summary") else {}),
+        **extras(result),
         "segments": [
             {
                 "type": "transcript.text.segment",

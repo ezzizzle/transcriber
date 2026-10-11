@@ -1,0 +1,55 @@
+Speaker 1: Okay, let's get going, I know we only have twenty minutes. Priya, do you want to start with the mobile stuff?
+
+Speaker 2: Yeah. So the big one is the login timeout bug. It's hitting, uh, roughly four percent of sessions on Android. I have a fix, it's mostly done, I just need to test it on the older devices. I'll have it merged by Wednesday.
+
+Speaker 1: Great. Is that the one support keeps escalating?
+
+Speaker 2: That's the one. And related to that, Dana, you asked about the crash numbers last week. I have them, I'll send them to you right after this call.
+
+Speaker 1: Perfect, thanks. Tom, pricing page?
+
+Speaker 3: So, we got the new tiers signed off on Monday, which is good. What we don't have is copy. Marketing said they're swamped, so I'm just going to draft it myself and get it to them by the end of this week, and they can edit rather than write.
+
+Speaker 1: Fine by me. What about the dashboard redesign, were we going to pick that back up?
+
+Speaker 3: Honestly I'd drop it for this quarter. Nobody's asking for it and we don't have a designer.
+
+Speaker 2: Agreed.
+
+Speaker 1: Okay, so that's dropped, we're not doing the dashboard redesign this quarter. Should we be thinking about hiring a contractor for design generally? I don't know. Let's not solve that now.
+
+Speaker 3: One thing I do need is the usability lab. We want to run the pricing page past five or six customers. I'll book the lab for the ninth, I think that's the only free day.
+
+Speaker 1: Good. On my side, legal came back on the contract and they're not happy with the data retention clause, so I'm going to email them today and find out exactly what wording they want. I was also going to write the release notes, but actually, Tom, didn't your intern say she wanted to do those?
+
+Speaker 3: She did, yeah. Leave it with her.
+
+Speaker 1: Okay, then I won't. Last thing, the support rota. We have nobody on Friday because Sam's out. Can either of you do it?
+
+Speaker 2: I can't, I'm at the dentist.
+
+Speaker 3: I'm in the lab prep all day. Sorry.
+
+Speaker 1: Right. Well, somebody needs to cover Friday, I'll ask around.
+
+Speaker 1: Um, okay, sorry, one more block of stuff before we go. The outage on Tuesday. Priya, can you, uh, just give us the short version?
+
+Speaker 2: Yeah, so, um, basically the the queue backed up for about forty minutes, it started at like ten past two, and, uh, nobody noticed until support got a ticket. Root cause was a a config change that halved the worker count. We rolled it back and it it drained in about ten minutes after that. So total, roughly fifty minutes of delayed emails, no data loss.
+
+Speaker 3: Do we know how many customers?
+
+Speaker 2: About three hundred and, um, sorry, three hundred and forty accounts had delayed emails. I'll write up the post-mortem properly, I'll have it done by Monday. And I'm gonna add an alert for the queue backing up, because the fact that support told us is, yeah, not great.
+
+Speaker 1: Agreed. We should really document the deploy process as well at some point, it's all in people's heads. Anyway. Um, the database migration, are we still saying March?
+
+Speaker 2: No, no, that slipped, it's April now. April the, uh, the fourteenth is the new date.
+
+Speaker 1: Okay, April fourteenth. Good to know. Tom, the conference thing?
+
+Speaker 3: Right, so the the design conference is in June and, uh, I'd like to go and I'd like to take Mia from support with me. It's about eleven hundred each with travel. I don't actually know if the budget covers two people, so I'll ask finance.
+
+Speaker 1: Yeah, ask them. I'm not going to go this year, I've got too much on. Oh, and that reminds me, the the SSL certificate for the main site expires on the twenty eighth. I'll renew it before then, I did it last year so I know where everything is.
+
+Speaker 3: Nice. Last one from me, I did those five customer interviews last week, the notes are a mess but there's some really good stuff about onboarding in there. I'll tidy them and send them round tomorrow morning.
+
+Speaker 1: Great, I'd love to read those. Okay, um, I think that's really it this time. Thanks.

@@ -107,6 +107,7 @@ def parse(rfile, content_type: str, content_length: int, upload_dir: Path, max_f
     reader = _Reader(rfile, content_length)
     fields: dict[str, list[str]] = {}
     files: dict[str, Upload] = {}
+    field_bytes = 0
     try:
         reader.read_until(delim, limit=_MAX_FIELD_BYTES)  # preamble
         while True:
@@ -126,7 +127,9 @@ def parse(rfile, content_type: str, content_length: int, upload_dir: Path, max_f
             filename = _disposition_param(disposition, "filename")
 
             if filename is None:
-                value = reader.read_until(b"\r\n" + delim, limit=_MAX_FIELD_BYTES)
+                # Text fields are held in memory, so they share one small budget.
+                value = reader.read_until(b"\r\n" + delim, limit=_MAX_FIELD_BYTES - field_bytes)
+                field_bytes += len(value)
                 fields.setdefault(name, []).append(value.decode("utf-8", "replace"))
                 continue
 
