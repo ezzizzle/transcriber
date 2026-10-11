@@ -75,20 +75,6 @@ def summary_prompt(diarized: bool) -> str:
     return SUMMARY_PROMPT.replace("ITEM_FORMAT", _ITEM_FORMATS[diarized]).replace("OWNER_RULE", _OWNER_RULES[diarized])
 
 
-MERGE_PROMPT = """\
-You receive summaries of consecutive parts of one long recording, inside <parts> tags. \
-Merge them into a single summary. Use only what the part summaries say.
-
-Lay the answer out exactly like this, with every point on its own line starting with "- ":
-
-## Key points
-- (every key point from the parts, in order, keeping the figures, names and dates; \
-merge points that say the same thing)
-
-## Action items
-- (every distinct action item from the parts, copied unchanged; drop exact \
-duplicates; if there are none, write "- None")"""
-
 # Asked separately, from the finished key points. Folding it into SUMMARY_PROMPT
 # as a third section made the model misattribute action items it had been
 # getting right.

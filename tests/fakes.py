@@ -14,6 +14,7 @@ import os
 import time
 from pathlib import Path
 
+from transcriber.llm import Answer
 from transcriber.transcript import Sentence, build_turns, to_result
 
 
@@ -43,7 +44,7 @@ def worker(conn, config, preload):
             if error:
                 warnings.append(f"The summary was skipped. {error}")
             else:
-                summary = {"executive_summary": answers[0], "key_points": [], "action_items": []}
+                summary = {"executive_summary": answers[0].text, "key_points": [], "action_items": []}
 
         sentences = [Sentence(start=0.0, end=1.0, text=text, confidence=1.0, words=[])]
         conn.send(("done", to_result(
@@ -69,7 +70,7 @@ def llm(conn, model_id):
     conn.send(("ready", None))
     while True:
         requests = conn.recv()
-        conn.send(("ok", [f"Summary of: {user}" for _, user, _ in requests]))
+        conn.send(("ok", [Answer(f"Summary of: {user}") for _, user, _ in requests]))
 
 
 def llm_that_cannot_load(conn, model_id):

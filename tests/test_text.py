@@ -7,7 +7,18 @@ from types import SimpleNamespace
 from transcriber import cleanup, formats, summary
 from transcriber.audio import pause_before
 from transcriber.jobs import Job, Options
+from transcriber.llm import Answer
 from transcriber.transcript import Sentence, assign_speakers, build_turns, to_result, tokens_to_words
+
+
+def model(reply, cut_off: bool = False):
+    """A stand-in for the language model: `reply(user_message)` is the text of each answer."""
+    return lambda requests: [Answer(reply(user), cut_off) for _, user, _ in requests]
+
+
+def passage(user_message: str) -> str:
+    """The passage inside a clean-up request, which a stand-in model can hand straight back."""
+    return user_message.split("\n")[1]
 
 
 def sentence(start: float, end: float, text: str, speaker: str | None = None) -> Sentence:
@@ -140,8 +151,8 @@ class CleanupTest(unittest.TestCase):
 
         def ask_many(requests):
             calls.append(len(requests))
-            # Echo the passage back, except one answer that goes off the rails.
-            return ["Sure!" if "bad" in user else user.split("\n")[1] for _, user, _ in requests]
+            # Hand each passage back, except for one answer that goes off the rails.
+            return [Answer("Sure!" if "bad" in user else passage(user)) for _, user, _ in requests]
 
         long = lambda word: " ".join([word] * 20)
         texts = [long("one"), "Um, yeah.", long("two"), long("bad"), long("three"), long("four")]
@@ -152,10 +163,17 @@ class CleanupTest(unittest.TestCase):
     def test_fillers_the_model_left_are_swept(self):
         left_in = "So the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon."
         rejected = "Um, " + " ".join(["word"] * 20)
-        ask_many = lambda requests: [left_in if "queue" in user else "No." for _, user, _ in requests]
+        ask_many = model(lambda user: left_in if "queue" in user else "No.")
         out = cleanup.clean_passages(ask_many, ["So, um, the queue backed up, and, uh, nobody noticed until support got a ticket about it that afternoon.", rejected])
         self.assertEqual(out[0], "So the queue backed up, and nobody noticed until support got a ticket about it that afternoon.")
         self.assertEqual(out[1], " ".join(["Word"] + ["word"] * 19))  # the model's answer was rejected; the original is still swept
+
+    def test_an_answer_that_ran_to_the_limit_is_not_trusted(self):
+        original = "Um, " + " ".join(["word"] * 20)
+        rewritten = " ".join(["other"] * 20)
+        self.assertEqual(cleanup.clean_passages(model(lambda user: rewritten), [original]), [rewritten])
+        self.assertEqual(cleanup.clean_passages(model(lambda user: rewritten, cut_off=True), [original]),
+                         [" ".join(["Word"] + ["word"] * 19)])
 
 
     def test_clean_turns(self):
@@ -165,8 +183,7 @@ class CleanupTest(unittest.TestCase):
             sentence(5, 6, "Um.", "Speaker 2"),  # nothing left once the filler is gone
             sentence(6, 9, "Okay, uh, thanks.", "Speaker 1"),
         ])
-        echo = lambda requests: [user.split("\n")[1] for _, user, _ in requests]
-        cleaned = cleanup.clean_turns(echo, turns, silences=[])
+        cleaned = cleanup.clean_turns(model(passage), turns, silences=[])
         # Speaker 2's turn is dropped, which leaves Speaker 1's two turns side by side: they become one.
         self.assertEqual(len(cleaned), 1)
         self.assertEqual(cleaned[0].speaker, "Speaker 1")
@@ -192,7 +209,7 @@ class SummaryTest(unittest.TestCase):
 
     def test_summarize(self):
         answer = "## Key points\n- A\n## Action items\n- Speaker: email legal (today)\n- Priya: fix the bug (by Wednesday)"
-        ask_many = lambda requests: ["They met. Things happened." if "<notes>" in user else answer for _, user, _ in requests]
+        ask_many = model(lambda user: "They met. Things happened." if "<notes>" in user else answer)
 
         result, problems = summary.summarize(ask_many, ["x"], diarized=True)
         self.assertEqual(problems, [])
@@ -203,19 +220,54 @@ class SummaryTest(unittest.TestCase):
         result, _ = summary.summarize(ask_many, ["x"], diarized=False)
         self.assertEqual(result["action_items"], ["Unassigned: email legal (today)", "Priya: fix the bug (by Wednesday)"])
 
+    def test_a_long_recording_is_summarized_in_parts(self):
+        def reply(user):
+            if "<notes>" in user:
+                return "A long meeting."
+            if "first" in user:
+                return "## Key points\n- Opening\n## Action items\n- Speaker 1: book the room\n- Speaker 2: send the notes"
+            return "## Key points\n- Closing\n## Action items\n- Speaker 2: send the notes\n- Speaker 1: pay the invoice"
+
+        blocks = ["Speaker 1: first " + "word " * 6000, "Speaker 2: second " + "word " * 6000]
+        result, problems = summary.summarize(model(reply), blocks, diarized=True)
+        self.assertEqual(problems, [])
+        self.assertEqual(result["key_points"], ["Opening", "Closing"])  # every part's points, in order
+        self.assertEqual(result["action_items"],  # and its tasks, without the one that came up twice
+                         ["Speaker 1: book the room", "Speaker 2: send the notes", "Speaker 1: pay the invoice"])
+        self.assertEqual(result["executive_summary"], "A long meeting.")
+
     def test_an_answer_cut_short_is_reported(self):
-        cut_short = lambda requests: ["Fine." if "<notes>" in user else "## Key points\n- A\n- B" for _, user, _ in requests]
-        result, problems = summary.summarize(cut_short, ["x"], diarized=True)
+        complete = "## Key points\n- A\n## Action items\n- Speaker 1: one"
+        reply = lambda text: (lambda user: "Fine." if "<notes>" in user else text)
+
+        # The model ran out of room. What it wrote is kept, and the reader is told it may not be all.
+        result, problems = summary.summarize(model(reply(complete), cut_off=True), ["x"], diarized=True)
+        self.assertEqual(result["action_items"], ["Speaker 1: one"])
+        self.assertEqual(problems, ["The summary was cut short, so key points or action items may be missing."])
+
+        # An answer with no action items section at all never got that far.
+        result, problems = summary.summarize(model(reply("## Key points\n- A\n- B")), ["x"], diarized=True)
         self.assertEqual((result["key_points"], result["action_items"]), (["A", "B"], []))
         self.assertEqual(len(problems), 1)
-        self.assertIn("no action items section", problems[0])
 
-        # Saying there are none is not the same as the section being missing.
-        none = lambda requests: ["Fine." if "<notes>" in user else "## Key points\n- A\n## Action items\n- None" for _, user, _ in requests]
+        # Saying there are none is different, and nothing to report.
+        none = model(reply("## Key points\n- A\n## Action items\n- None"))
         self.assertEqual(summary.summarize(none, ["x"], diarized=True)[1], [])
 
+    def test_a_part_cut_short_is_reported_even_when_the_others_are_fine(self):
+        def ask_many(requests):
+            (_, user, _), = requests
+            if "<notes>" in user:
+                return [Answer("Fine.")]
+            return [Answer("## Key points\n- A\n## Action items\n- Speaker 1: one", cut_off="second" in user)]
+
+        blocks = ["Speaker 1: first " + "word " * 6000, "Speaker 2: second " + "word " * 6000]
+        result, problems = summary.summarize(ask_many, blocks, diarized=True)
+        self.assertEqual(problems, ["The summary for part 2 of 2 of the recording was cut short, so key points or action items may be missing."])
+        self.assertEqual(result["key_points"], ["A", "A"])
+
     def test_an_unreadable_answer_gives_no_summary(self):
-        result, problems = summary.summarize(lambda requests: ["I'm sorry, I can't help with that."], ["x"], diarized=True)
+        result, problems = summary.summarize(model(lambda user: "I'm sorry, I can't help with that."), ["x"], diarized=True)
         self.assertIsNone(result)
         self.assertEqual(len(problems), 1)
 

@@ -138,6 +138,8 @@ nobody waiting behind a long file, not about total throughput.
   can't be loaded: the transcript is still returned, with a warning saying what
   is missing. Warnings show on the job in the web UI, at the end of the TXT and
   Markdown downloads, and as `warnings` in the JSON formats.
+- **The language model runs out of room** while writing a summary: what it
+  wrote is kept, with a warning that key points or action items may be missing.
 - **The speech model fails to load at startup**, or takes more than an hour:
   `/health` reports the error and the server carries on. Each job then tries to
   load it again, and the error clears as soon as one succeeds.
@@ -222,9 +224,10 @@ separate field in every JSON format (where `text` stays transcript-only):
 Action items name an owner only when speakers are identified ("Speaker 2", or
 "Speaker 2 (Priya)" when the name is clear from the conversation). Without
 diarization the model cannot tell who said what, so tasks are listed without an
-owner and the summary avoids attributing statements to anyone. Transcripts longer than
-about 50 minutes of speech are summarized in parts and then merged. Treat the
-result as a draft: see [Known limits](#known-limits).
+owner and the summary avoids attributing statements to anyone. Transcripts
+longer than about 50 minutes of speech are summarized in parts, and the parts'
+key points and action items are listed one after another. Treat the result as
+a draft: see [Known limits](#known-limits).
 
 ## Configuration
 

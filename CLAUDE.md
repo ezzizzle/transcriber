@@ -52,7 +52,8 @@ The text handling is ordinary functions with no model or file access, so it
 is all unit-tested: `transcript.py` (sentences, speakers, turns),
 `cleanup.py`, `summary.py`, `formats.py`. Clean-up and summarizing take an
 `ask_many(requests) -> answers` function instead of a model, which is how
-tests and `evals/` drive them.
+tests and `evals/` drive them. An answer is an `llm.Answer`: its text, and
+whether it was cut off at the token limit.
 
 A finished job's result is a plain dict, documented at the top of
 `formats.py` and built in `transcript.to_result`.
@@ -90,6 +91,9 @@ A finished job's result is a plain dict, documented at the top of
 - **Reserve before reading an upload.** `Engine.reserve` counts uploads that
   are still arriving against the queue and the free disk space; the server
   releases the reservation in a `finally`.
+- **A cut-off answer is not a complete one.** Clean-up discards an answer that
+  hit its token limit; the summary keeps it and adds a warning. Keep checking
+  `Answer.cut_off` wherever the model's output is treated as a full list.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

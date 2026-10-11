@@ -90,8 +90,8 @@ def clean_passages(ask_many, texts: list[str], batch_size: int = 4, progress=lam
     """Clean each passage on its own, sending a few at a time to the model.
 
     `ask_many` takes a list of (system, user, max_tokens) requests and returns
-    the model's answers. Batching is only for speed: generating for several
-    passages at once is about twice as fast as one after another.
+    the model's answers (see llm.Answer). Batching is only for speed: generating
+    for several passages at once is about twice as fast as one after another.
     """
     out = [strip_fillers(text) if len(text.split()) < _MIN_LLM_WORDS else None for text in texts]
     todo = [i for i, cleaned in enumerate(out) if cleaned is None]
@@ -103,10 +103,11 @@ def clean_passages(ask_many, texts: list[str], batch_size: int = 4, progress=lam
             (CLEANUP_PROMPT, f"<transcript>\n{texts[i]}\n</transcript>", len(texts[i].split()) * 3 + 200)
             for i in batch
         ])  # fmt: skip
-        for i, raw in zip(batch, answers):
-            cleaned = normalize_paragraphs(raw)
+        for i, answer in zip(batch, answers):
+            cleaned = normalize_paragraphs(answer.text)
+            accepted = plausible(texts[i], cleaned) and not answer.cut_off
             # The model lets some fillers through, and its rejected answers leave them all in.
-            out[i] = strip_fillers(cleaned if plausible(texts[i], cleaned) else texts[i])
+            out[i] = strip_fillers(cleaned if accepted else texts[i])
             done += len(texts[i].split())
         progress(done / total)
     return out
