@@ -5,18 +5,21 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from tests import fakes
+from transcriber import engine as engine_module
 from transcriber.config import Config
-from transcriber.engine import Engine, QueueFull, _private_dir
+from transcriber.engine import Engine, NoRoom, _private_dir
 from transcriber.jobs import Job, Options
 
 
 class EngineTest(unittest.TestCase):
-    def engine(self, llm=fakes.llm, **settings) -> Engine:
+    def engine(self, worker=fakes.worker, llm=fakes.llm, **settings) -> Engine:
         work_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         settings = {"max_parallel": 1, "stall_seconds": 30, **settings}
-        engine = Engine(Config(work_dir=work_dir, **settings), worker_main=fakes.worker, llm_main=llm)
+        engine = Engine(Config(work_dir=work_dir, **settings), worker_main=worker, llm_main=llm)
         engine.start()
         self.assertTrue(engine.ready.wait(20))
         return engine
@@ -46,11 +49,33 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(engine.job_status(first)["queue_position"], None)
         self.assertEqual(engine.job_status(second)["queue_position"], 1)
         self.assertEqual(engine.job_status(third)["queue_position"], 2)
-        self.assertTrue(engine.queue_full())
-        with self.assertRaises(QueueFull):
+        with self.assertRaises(NoRoom):
+            engine.reserve(size=1000)
+        with self.assertRaises(NoRoom):
             self.submit(engine, "four")
         self.assertEqual([self.finish(j).status for j in (first, second, third)], ["done"] * 3)
         self.assertLess(second.started, third.started)  # first come, first served
+
+    def test_uploads_still_arriving_count_against_the_queue(self):
+        engine = self.engine(max_queue=2)
+        engine.reserve(size=1000)
+        engine.reserve(size=1000)
+        with self.assertRaises(NoRoom) as refused:
+            engine.reserve(size=1000)
+        self.assertIn("queue is full", str(refused.exception))
+        engine.release(size=1000)  # one of them failed or arrived
+        engine.reserve(size=1000)
+
+    def test_uploads_are_refused_when_the_disk_is_nearly_full(self):
+        engine = self.engine()
+        gb = 1024**3
+        with mock.patch.object(engine_module.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * gb)):
+            engine.reserve(size=2 * gb)  # leaves 3 GB, of which 2 GB must stay free
+            with self.assertRaises(NoRoom) as refused:
+                engine.reserve(size=2 * gb)  # the first is still arriving, so its bytes are spoken for
+            self.assertIn("disk space", str(refused.exception))
+            engine.release(size=2 * gb)
+            engine.reserve(size=2 * gb)
 
     def test_two_jobs_run_at_once_when_allowed(self):
         engine = self.engine(max_parallel=2)
@@ -77,6 +102,46 @@ class EngineTest(unittest.TestCase):
         stuck = self.finish(self.submit(engine, "hang"))
         self.assertIn("stopped responding", stuck.error)
         self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+
+    def test_a_job_the_server_cannot_start_fails_without_taking_the_slot_with_it(self):
+        engine = self.engine()
+        self.finish(self.submit(engine, "crash"))  # so that the next job needs a new worker
+
+        start_worker, failures = engine_module.Worker, [OSError("cannot start a process")]
+
+        def flaky(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return start_worker(*args, **kwargs)
+
+        with mock.patch.object(engine_module, "Worker", flaky), mock.patch("traceback.print_exc"):
+            failed = self.finish(self.submit(engine, "unlucky"))
+            self.assertEqual(failed.status, "error")
+            self.assertIn("cannot start a process", failed.error)
+            self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+        self.assertEqual(engine.stats()["running"], 0)
+
+    def test_a_file_that_cannot_be_deleted_does_not_stop_the_job_finishing(self):
+        engine = self.engine()
+        with mock.patch.object(engine_module.Path, "unlink", side_effect=PermissionError("locked")), \
+                mock.patch.object(engine_module.sys, "stderr"):
+            job = self.finish(self.submit(engine, "hello there"))
+        self.assertEqual(job.status, "done")
+        self.assertEqual(engine.stats()["running"], 0)
+        self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+
+    def test_a_speech_model_that_fails_to_load_is_reported_until_a_job_works(self):
+        engine = self.engine(worker=fakes.worker_that_cannot_load_its_model)
+        self.assertIn("the network is down", engine.load_error)
+        self.assertEqual(self.finish(self.submit(engine, "hello there")).status, "done")
+        self.assertIsNone(engine.load_error)
+
+    def test_a_speech_model_that_never_loads_does_not_hold_up_the_queue(self):
+        with mock.patch.object(engine_module, "_SPEECH_LOAD_TIMEOUT", 1):
+            engine = self.engine(worker=fakes.worker_that_hangs_at_startup)
+        self.assertIn("did not finish loading", engine.load_error)
+        self.assertEqual(self.finish(self.submit(engine, "hello there")).status, "done")
+        self.assertIsNone(engine.load_error)
 
     def test_the_language_model_is_reached_through_the_engine(self):
         engine = self.engine()

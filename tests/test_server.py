@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import socket
 import tempfile
 import threading
 import time
@@ -12,6 +13,7 @@ from unittest import mock
 from tests import fakes
 from transcriber.config import Config
 from transcriber.engine import Engine
+from transcriber import server as server_module
 from transcriber.server import Handler, Server
 
 
@@ -63,12 +65,12 @@ class Browser:
 
 
 class ServerTest(unittest.TestCase):
-    def serve(self, **settings) -> int:
+    def serve(self, worker=fakes.worker, **settings) -> int:
         """Start a server on a free port and return the port."""
         work_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(Handler, "log_message", lambda *args: None))  # keep the test output quiet
         config = Config(host="127.0.0.1", port=0, work_dir=work_dir, max_parallel=1, **settings)
-        engine = Engine(config, worker_main=fakes.worker, llm_main=fakes.llm)
+        engine = self.engine = Engine(config, worker_main=worker, llm_main=fakes.llm)
         server = Server(config, engine)
         engine.start()
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -92,6 +94,30 @@ class ServerTest(unittest.TestCase):
 
         self.assertEqual(browser.request("DELETE", f"/api/jobs/{job['id']}")[0], 200)
         self.assertEqual(browser.get("/api/jobs")[1]["jobs"], [])
+
+    def test_raw_and_cleaned_text_can_be_compared(self):
+        browser = Browser(self.serve())
+        job = browser.upload_and_wait("um so um we shipped it", cleanup="true")
+        self.assertTrue(job["cleaned"])
+        turn = job["result"]["turns"][0]
+        self.assertEqual((turn["text"], turn["raw_text"]), ("so we shipped it", "um so um we shipped it"))
+
+        status, comparison = browser.get(f"/api/jobs/{job['id']}/comparison")
+        self.assertEqual(status, 200)
+        self.assertEqual(comparison["turns"][0]["changes"],
+                         [["filler", "um"], ["same", "so"], ["filler", "um"], ["same", "we shipped it"]])
+
+        _, whole = browser.get(f"/api/jobs/{job['id']}/download?format=json")
+        self.assertEqual((whole["text"], whole["raw_text"]), ("so we shipped it", "um so um we shipped it"))
+        self.assertEqual(whole["changes"], "~~um~~ so ~~um~~ we shipped it")
+        self.assertEqual(whole["turns"][0]["changes"], "~~um~~ so ~~um~~ we shipped it")
+
+        # Nothing to compare when clean-up wasn't asked for, and nobody else may look.
+        plain = browser.upload_and_wait("um hello")
+        self.assertFalse(plain["cleaned"])
+        self.assertNotIn("raw_text", plain["result"]["turns"][0])
+        self.assertEqual(browser.get(f"/api/jobs/{plain['id']}/comparison")[0], 400)
+        self.assertEqual(Browser(browser.port).get(f"/api/jobs/{job['id']}/comparison")[0], 404)
 
     def test_one_browser_cannot_see_anothers_transcripts(self):
         port = self.serve()
@@ -152,9 +178,33 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(browser.upload("/api/jobs", "third")[0], 503)
         self.assertEqual([browser.wait(job)["status"] for job in (first, second)], ["done", "done"])
 
+    def test_an_upload_that_stalls_is_dropped_and_frees_its_place(self):
+        with mock.patch.object(server_module, "UPLOAD_STALL_SECONDS", 0.5):
+            port = self.serve(max_queue=1)
+            stalled = socket.create_connection(("127.0.0.1", port), timeout=10)
+            stalled.sendall(
+                b"POST /api/jobs HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\n"
+                b"Content-Length: 100000\r\n\r\n"
+                b'--b\r\nContent-Disposition: form-data; name="file"; filename="talk.mp3"\r\n\r\nthe first few bytes'
+            )
+            time.sleep(0.2)
+            self.assertEqual(Browser(port).upload("/api/jobs", "hello")[0], 503)  # the only place is taken
+            self.assertEqual(stalled.recv(1000), b"")  # the server gives up and hangs up
+            stalled.close()
+        self.assertEqual(list(self.engine.files_dir.iterdir()), [])  # nothing of the partial upload is kept
+        self.assertEqual(Browser(port).upload_and_wait("hello")["status"], "done")  # and its place is free again
+
     def test_health(self):
         status, health = Browser(self.serve()).get("/health")
         self.assertEqual((status, health["status"], health["queued"]), (200, "ok", 0))
+
+    def test_health_recovers_once_a_job_has_worked(self):
+        browser = Browser(self.serve(worker=fakes.worker_that_cannot_load_its_model))
+        status, health = browser.get("/health")
+        self.assertEqual((status, health["status"]), (503, "error"))
+        self.assertIn("the network is down", health["error"])
+        browser.upload_and_wait("hello there")
+        self.assertEqual(browser.get("/health")[1]["status"], "ok")
 
 
 if __name__ == "__main__":

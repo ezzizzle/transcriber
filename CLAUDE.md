@@ -50,9 +50,10 @@ which asks `SharedLLM`; workers never talk to the model directly.
 
 The text handling is ordinary functions with no model or file access, so it
 is all unit-tested: `transcript.py` (sentences, speakers, turns),
-`cleanup.py`, `summary.py`, `formats.py`. Clean-up and summarizing take an
-`ask_many(requests) -> answers` function instead of a model, which is how
-tests and `evals/` drive them.
+`cleanup.py`, `summary.py`, `compare.py`, `formats.py`. Clean-up and
+summarizing take an `ask_many(requests) -> answers` function instead of a
+model, which is how tests and `evals/` drive them. An answer is an
+`llm.Answer`: its text, and whether it was cut off at the token limit.
 
 A finished job's result is a plain dict, documented at the top of
 `formats.py` and built in `transcript.to_result`.
@@ -81,8 +82,26 @@ A finished job's result is a plain dict, documented at the top of
   `engine.files_dir` and are deleted by the slot thread, not the worker, so a
   crashed or killed worker can't leave a recording behind.
 - **Everything that waits has a deadline.** Worker replies, language-model
-  replies and ffmpeg all give up after `stall_seconds`. Don't add a wait
-  without one.
+  replies and ffmpeg give up after `stall_seconds`; the speech model's first
+  load after an hour; a silent upload after a minute. Don't add a wait without
+  one.
+- **A slot thread must never die.** `Engine._slot` catches whatever goes wrong
+  with a job, fails that job and carries on, and `_finish` always sets
+  `job.done`. A dead slot means queued jobs that nobody will ever run.
+- **Reserve before reading an upload.** `Engine.reserve` counts uploads that
+  are still arriving against the queue and the free disk space; the server
+  releases the reservation in a `finally`.
+- **A cut-off answer is not a complete one.** Clean-up discards an answer that
+  hit its token limit; the summary keeps it and adds a warning. Keep checking
+  `Answer.cut_off` wherever the model's output is treated as a full list.
+- **A failed summary step costs only that step.** `summary.summarize` keeps
+  the parts and sections already written and reports the rest as problems.
+- **Keep the original next to the cleaned text.** Each turn of a cleaned
+  transcript carries `raw_text`, and `compare.changes` is how a person checks
+  the model's work: the page's "Show changes" and the `changes` Markdown in
+  the JSON download are both made from it. Nothing automatic can tell a fixed
+  typo from a changed name. The comparison ignores punctuation except inside
+  numbers, where it changes the meaning.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

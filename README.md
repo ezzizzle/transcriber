@@ -113,7 +113,9 @@ Up to `TRANSCRIBER_MAX_PARALLEL` jobs are processed at once; the rest wait in a
 first-come-first-served queue, and the web UI shows each waiting job's place in
 line. API requests share the same queue and simply block until their turn.
 At most `TRANSCRIBER_MAX_QUEUE` uploads may wait; beyond that, new uploads are
-turned away with a 503 until the queue drains.
+turned away with a 503 until the queue drains. Uploads still on their way count
+towards that limit, and an upload is also turned away if it would leave less
+than 2 GB of disk free.
 
 Each parallel job runs in its own worker process with its own speech and
 diarization models, so every extra slot costs memory (see
@@ -136,6 +138,17 @@ nobody waiting behind a long file, not about total throughput.
   can't be loaded: the transcript is still returned, with a warning saying what
   is missing. Warnings show on the job in the web UI, at the end of the TXT and
   Markdown downloads, and as `warnings` in the JSON formats.
+- **The language model runs out of room** while writing a summary: what it
+  wrote is kept, with a warning that key points or action items may be missing.
+- **The language model fails part-way through a summary**: the sections it had
+  finished are kept, with a warning naming the one that is missing.
+- **The speech model fails to load at startup**, or takes more than an hour:
+  `/health` reports the error and the server carries on. Each job then tries to
+  load it again, and the error clears as soon as one succeeds.
+- **An upload stalls** for a minute: the connection is dropped and the partial
+  file deleted.
+- **Anything unexpected** while starting or finishing a job: that job fails
+  with the reason, and the slot goes on to the next one.
 
 ## API
 
@@ -197,6 +210,30 @@ so its output gets a final pattern-matching sweep that removes any remaining
 "um", "uh", "er", "ah" and "hmm". Phrases such as "you know" and "like" are left
 to the model, since a pattern can't tell when they carry meaning.
 
+#### Checking what clean-up changed
+
+Clean-up is done by a language model, and the only automatic check on its work
+is that the result is about the right length. That would not notice a changed
+name or number, or a dropped "not". So a cleaned-up transcript keeps the
+original alongside:
+
+- In the web UI, **Show changes** marks the transcript with what clean-up did:
+  filler sounds it removed are greyed and struck through, other words it
+  removed are struck through in red, and words it added or changed are
+  highlighted. Capitals and punctuation are not compared, except inside a
+  number: "1.5%" becoming "15%" is shown as a change.
+- The JSON download has three versions, for the whole transcript and again on
+  every turn: `text` as cleaned up, `raw_text` as transcribed, and `changes`.
+  `changes` is the cleaned-up text written in Markdown for a person to read,
+  with the words clean-up took out ~~struck through~~ and the words it put in
+  in **bold**.
+- The API's JSON formats give the cleaned-up `text`; their `segments` and
+  `words` are always the raw transcription.
+
+A turn that was nothing but filler ("Um.") is removed by clean-up altogether,
+so there is no turn left to compare. It is still in the whole-transcript
+`raw_text` and in `segments`.
+
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
@@ -213,9 +250,10 @@ separate field in every JSON format (where `text` stays transcript-only):
 Action items name an owner only when speakers are identified ("Speaker 2", or
 "Speaker 2 (Priya)" when the name is clear from the conversation). Without
 diarization the model cannot tell who said what, so tasks are listed without an
-owner and the summary avoids attributing statements to anyone. Transcripts longer than
-about 50 minutes of speech are summarized in parts and then merged. Treat the
-result as a draft: see [Known limits](#known-limits).
+owner and the summary avoids attributing statements to anyone. Transcripts
+longer than about 50 minutes of speech are summarized in parts, and the parts'
+key points and action items are listed one after another. Treat the result as
+a draft: see [Known limits](#known-limits).
 
 ## Configuration
 
@@ -316,6 +354,7 @@ transcriber/
   transcript.py   sentences, speakers and turns; builds the result
   cleanup.py      clean-up: fillers, passages, paragraphs
   summary.py      executive summary, key points, action items
+  compare.py      what clean-up changed, word by word
   prompts.py      the instructions given to the language model
   llm.py          the language model's process, and the server's handle on it
   formats.py      text / Markdown / SRT / VTT / JSON renderers

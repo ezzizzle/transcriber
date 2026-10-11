@@ -89,6 +89,15 @@
   .turn-head time { font-weight: 400; color: var(--muted); margin-left: 6px; font-variant-numeric: tabular-nums; }
   .turn p { margin: 0 0 10px; max-width: 68ch; }
   .turn p:last-child { margin-bottom: 0; }
+  /* "Show changes": what clean-up took out and put in. */
+  .turn del { color: var(--danger); }
+  .turn del.filler { color: var(--muted); }
+  .turn ins { text-decoration: none; background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 2px; }
+  .changes-key { margin-top: 12px; font-size: 12px; color: var(--muted); max-width: 68ch; }
+  .changes-key del, .changes-key ins { margin: 0 2px; white-space: nowrap; }
+  .changes-key del { color: var(--danger); }
+  .changes-key del.filler { color: var(--muted); }
+  .changes-key ins { text-decoration: none; background: var(--accent-soft); color: var(--accent); border-radius: 3px; padding: 0 2px; }
   .summary { margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); }
   .summary h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 14px 0 6px; }
   .summary ul { margin: 0; padding-left: 20px; max-width: 68ch; }
@@ -200,7 +209,15 @@ function makeRow(id) {
   row.barFill = el("i");
   row.bar = el("div", { className: "bar" }, row.barFill);
   row.actions = el("div", { className: "actions" });
-  row.transcript = el("div", { className: "transcript", hidden: true });
+  row.changesKey = el("div", { className: "changes-key", hidden: true },
+    "Comparing with the transcript before clean-up:",
+    el("del", { className: "filler", textContent: "filler removed" }),
+    el("del", { textContent: "other words removed" }),
+    el("ins", { textContent: "words added or changed" }),
+    "Capitals and punctuation are not compared, except inside numbers.");
+  row.turnsBox = el("div");
+  row.summaryBox = el("div");
+  row.transcript = el("div", { className: "transcript", hidden: true }, row.changesKey, row.turnsBox, row.summaryBox);
   row.root = el("div", { className: "job card" },
     el("div", { className: "job-head" }, row.name, row.tags, row.statusLine, row.notice, row.timings, row.bar, row.actions),
     row.transcript);
@@ -285,8 +302,12 @@ function updateJob(row, job) {
   if (job.status === "done") {
     row.viewBtn = el("button", { className: "primary", textContent: "View", onclick: () => attempt(row, () => toggle(row)) });
     row.actions.append(row.viewBtn,
-      el("button", { textContent: "Copy", onclick: (e) => attempt(row, () => copy(row, e.target)) }),
-      el("label", { textContent: "Download" }));
+      el("button", { textContent: "Copy", onclick: (e) => attempt(row, () => copy(row, e.target)) }));
+    if (job.cleaned) {  // clean-up rewrote the text, so offer to show what it changed
+      row.changesBtn = el("button", { textContent: "Show changes", onclick: () => attempt(row, () => toggleChanges(row)) });
+      row.actions.append(row.changesBtn);
+    }
+    row.actions.append(el("label", { textContent: "Download" }));
     for (const fmt of ["txt", "md", "srt", "vtt", "json"])
       row.actions.append(el("a", { className: "btn", textContent: fmt.toUpperCase(),
         href: `/api/jobs/${job.id}/download?format=${fmt}`, download: "" }));
@@ -312,19 +333,7 @@ async function loadTranscript(row) {
   const res = await fetch(`/api/jobs/${row.id}`);
   if (!res.ok) throw new Error("This transcript is no longer available.");
   row.result = (await res.json()).result;
-  const speakers = row.result.speakers;
-  row.transcript.replaceChildren(...row.result.turns.map((turn) => {
-    const node = el("div", { className: "turn" });
-    if (turn.speaker) {
-      const head = el("div", { className: "turn-head", textContent: turn.speaker },
-        el("time", { textContent: clock(turn.start) }));
-      head.style.color = `var(--s${speakers.indexOf(turn.speaker) % 6 + 1})`;
-      node.append(head);
-    }
-    for (const para of turn.text.split(/\n\n+/)) node.append(el("p", { textContent: para }));
-    return node;
-  }));
-  if (!row.result.turns.length) row.transcript.append(el("p", { textContent: "No speech was detected in this file." }));
+  showTurns(row);
   const sections = summarySections(row.result);
   if (sections.length) {
     const box = el("div", { className: "summary" });
@@ -333,10 +342,56 @@ async function loadTranscript(row) {
         ? el("p", { textContent: body })
         : el("ul", {}, ...body.map((b) => el("li", { textContent: b }))));
     box.append(el("small", { textContent: SUMMARY_NOTE }));
-    row.transcript.append(box);
+    row.summaryBox.replaceChildren(box);
   }
   row.loaded = true;
   return row.result;
+}
+
+// Fills in the transcript: as cleaned up, or (with row.comparing) marked with what clean-up changed.
+function showTurns(row) {
+  const speakers = row.result.speakers;
+  const turns = row.comparing ? row.comparison : row.result.turns;
+  row.turnsBox.replaceChildren(...turns.map((turn) => {
+    const node = el("div", { className: "turn" });
+    if (turn.speaker) {
+      const head = el("div", { className: "turn-head", textContent: turn.speaker },
+        el("time", { textContent: clock(turn.start) }));
+      head.style.color = `var(--s${speakers.indexOf(turn.speaker) % 6 + 1})`;
+      node.append(head);
+    }
+    node.append(...(row.comparing ? changedParagraphs(turn.changes)
+      : turn.text.split(/\n\n+/).map((text) => el("p", { textContent: text }))));
+    return node;
+  }));
+  if (!turns.length) row.turnsBox.append(el("p", { textContent: "No speech was detected in this file." }));
+  row.changesKey.hidden = !row.comparing;
+}
+
+// One turn's cleaned-up text as paragraphs, with removed words struck through and added ones highlighted.
+// `changes` is a list of [kind, text]; the kinds are described in compare.py.
+function changedParagraphs(changes) {
+  const paragraphs = [el("p")];
+  for (const [kind, text] of changes) {
+    if (kind === "break") paragraphs.push(el("p"));
+    else if (kind === "same") paragraphs.at(-1).append(text + " ");
+    else if (kind === "added") paragraphs.at(-1).append(el("ins", { textContent: text }), " ");
+    else paragraphs.at(-1).append(el("del", { className: kind, textContent: text }), " ");
+  }
+  return paragraphs;
+}
+
+async function toggleChanges(row) {
+  await loadTranscript(row);
+  if (!row.comparison) {
+    const res = await fetch(`/api/jobs/${row.id}/comparison`);
+    if (!res.ok) throw new Error("The comparison with the original is not available.");
+    row.comparison = (await res.json()).turns;
+  }
+  row.comparing = !row.comparing;
+  showTurns(row);
+  row.changesBtn.textContent = row.comparing ? "Hide changes" : "Show changes";
+  if (row.comparing && !row.open) await toggle(row);
 }
 
 async function toggle(row) {

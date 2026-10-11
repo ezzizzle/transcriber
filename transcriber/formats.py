@@ -7,7 +7,7 @@ A result is a plain dict:
       "diarized": bool, "cleaned": bool, "speakers": [str],
       "segments": [{"id", "start", "end", "text", "speaker"|None, "confidence"}],
       "words":    [{"word", "start", "end", "speaker"|None}],
-      "turns":    [{"speaker"|None, "start", "end", "text"}],
+      "turns":    [{"speaker"|None, "start", "end", "text", "raw_text" if cleaned}],
       "summary":  {"executive_summary": str, "key_points": [str], "action_items": [str]} | None,
       "warnings": [str],             # optional stages that failed or may be incomplete
       "timings":  {stage: seconds},  # see jobs.STAGE_KEYS
@@ -16,12 +16,15 @@ A result is a plain dict:
 It is built in transcript.to_result.
 
 Segments and words always carry the raw transcription (they have timestamps).
-Turns are consecutive segments by one speaker; their text is what the cleanup
-pass rewrites, with paragraphs separated by blank lines.
+Turns are consecutive segments by one speaker; their `text` is what clean-up
+rewrites, with paragraphs separated by blank lines. When it has, `raw_text`
+is the same turn as transcribed.
 """
 
 import json
 import math
+
+from . import compare
 
 
 def timestamp(seconds: float, ms_sep: str = ".") -> str:
@@ -39,11 +42,33 @@ def clock(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def to_text(result: dict) -> str:
-    """Plain text. Speaker turns are prefixed with "Speaker N:" when diarized."""
+def to_text(result: dict, version: str = "text") -> str:
+    """Plain text. Speaker turns are prefixed with "Speaker N:" when diarized.
+
+    `version` is which form of each turn to use: "text" unless a caller has
+    given the turns another, as to_full_json does.
+    """
     if not result["diarized"]:
-        return "\n\n".join(t["text"] for t in result["turns"])
-    return "\n\n".join(f"{t['speaker']}: {t['text']}" for t in result["turns"])
+        return "\n\n".join(t[version] for t in result["turns"])
+    return "\n\n".join(f"{t['speaker']}: {t[version]}" for t in result["turns"])
+
+
+def raw_text(result: dict) -> str:
+    """The whole transcript exactly as transcribed, laid out like to_text.
+
+    It is put together from the segments rather than the turns, because
+    clean-up drops a turn that was nothing but filler ("Um."). That turn was
+    said, so it belongs here, and it no longer has a turn of its own.
+    """
+    said: list[tuple[str | None, list[str]]] = []  # (speaker, sentences) for each run by one speaker
+    for segment in result["segments"]:
+        if said and said[-1][0] == segment["speaker"]:
+            said[-1][1].append(segment["text"])
+        else:
+            said.append((segment["speaker"], [segment["text"]]))
+    if not result["diarized"]:
+        return "\n\n".join(" ".join(sentences) for _, sentences in said)
+    return "\n\n".join(f"{speaker}: {' '.join(sentences)}" for speaker, sentences in said)
 
 
 def extras(result: dict) -> dict:
@@ -178,5 +203,20 @@ def to_diarized_json(result: dict) -> dict:
 
 
 def to_full_json(result: dict) -> str:
-    """Everything we know, for the web UI's JSON download."""
-    return json.dumps({"text": to_text(result), **result}, indent=2, ensure_ascii=False) + "\n"
+    """Everything we know, for the web UI's JSON download.
+
+    A cleaned-up transcript is there three times, both whole and turn by turn:
+    `text` as cleaned, `raw_text` as transcribed, and `changes`, which is the
+    cleaned text in Markdown with what clean-up ~~took out~~ and **put in**,
+    for a person who wants to check it.
+
+    A turn that was nothing but filler has no turn left to compare: clean-up
+    removed it. It is still in the whole `raw_text` and in the segments.
+    """
+    whole = {"text": to_text(result)}
+    if result.get("cleaned"):
+        turns = [{**turn, "changes": compare.as_markdown(turn["raw_text"], turn["text"])} for turn in result["turns"]]
+        result = {**result, "turns": turns}
+        whole["raw_text"] = raw_text(result)
+        whole["changes"] = to_text(result, "changes")
+    return json.dumps({**whole, **result}, indent=2, ensure_ascii=False) + "\n"

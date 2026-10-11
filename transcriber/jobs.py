@@ -64,6 +64,7 @@ class Job:
             "diarize": self.options.diarize,
             "cleanup": self.options.cleanup,
             "summarize": self.options.summary,
+            "cleaned": bool(self.result and self.result["cleaned"]),  # clean-up was asked for and worked
             "created": self.created,
             "elapsed": round((self.finished or time.time()) - self.started, 1) if self.started else None,
             "duration": self.result["duration"] if self.result else None,

@@ -5,16 +5,22 @@ shares it:
 
     worker  --ask-->  server process (SharedLLM)  --ask-->  llm_main (LocalModel)
 
-A request is (system prompt, user message, max_tokens); the answer is text.
+A request is (system prompt, user message, max_tokens); what comes back is an Answer.
 SharedLLM is the server's handle on the process. LocalModel and llm_main run
 inside it, and are the only code that loads the model.
 """
 
 import threading
 import time
+from typing import NamedTuple
 
 # Loading can include a multi-gigabyte download the first time.
 _LOAD_TIMEOUT = 3600.0
+
+
+class Answer(NamedTuple):
+    text: str
+    cut_off: bool = False  # the model was still writing when it reached max_tokens, so the end is missing
 
 
 class LanguageModelError(Exception):
@@ -32,10 +38,10 @@ class LocalModel:
 
         self.model, self.tokenizer = load(model_id)
 
-    def ask_many(self, requests: list[tuple[str, str, int]]) -> list[str]:
+    def ask_many(self, requests: list[tuple[str, str, int]]) -> list[Answer]:
         """Answer each (system, user, max_tokens) request; several are generated as one batch."""
         import mlx.core as mx
-        from mlx_lm import batch_generate, generate
+        from mlx_lm import batch_generate, stream_generate
         from mlx_lm.sample_utils import make_sampler
 
         prompts = []
@@ -50,8 +56,19 @@ class LocalModel:
         sampler = make_sampler(temp=0.0)
         try:
             if len(prompts) == 1:
-                return [generate(self.model, self.tokenizer, prompt=prompts[0], max_tokens=limits[0], sampler=sampler)]
-            return batch_generate(self.model, self.tokenizer, prompts, max_tokens=limits, sampler=sampler).texts
+                text, finished_because = "", None
+                for piece in stream_generate(self.model, self.tokenizer, prompts[0], max_tokens=limits[0], sampler=sampler):
+                    text += piece.text
+                    finished_because = piece.finish_reason  # "stop" at a natural end, "length" at the limit
+                return [Answer(text, cut_off=finished_because == "length")]
+            batch = batch_generate(
+                self.model, self.tokenizer, prompts, max_tokens=limits, sampler=sampler, return_token_ids=True
+            )
+            # A batch doesn't say why each answer ended, but one that used its whole allowance was cut off.
+            return [
+                Answer(text, cut_off=len(tokens) >= limit)
+                for text, tokens, limit in zip(batch.texts, batch.token_ids, limits)
+            ]
         finally:
             if sum(len(prompt) for prompt in prompts) > 2000:  # long inputs leave gigabytes of buffers cached
                 mx.clear_cache()
@@ -61,7 +78,7 @@ def llm_main(conn, model_id: str):
     """Entry point of the model's process.
 
     Sends ("ready", error_or_None) once loaded. Then, for each list of requests
-    it receives, replies ("ok", [text, ...]) or ("error", message).
+    it receives, replies ("ok", [Answer, ...]) or ("error", message).
     """
     try:
         try:
@@ -96,7 +113,7 @@ class SharedLLM:
         self._last_used = time.monotonic()
         threading.Thread(target=self._stop_when_idle, name="llm-idle", daemon=True).start()
 
-    def ask(self, requests: list[tuple[str, str, int]], on_loading=lambda: None) -> tuple[list[str], float]:
+    def ask(self, requests: list[tuple[str, str, int]], on_loading=lambda: None) -> tuple[list[Answer], float]:
         """Returns (answers, seconds spent loading the model first, usually 0).
 
         `on_loading` is called if the model has to be loaded, which takes a while.

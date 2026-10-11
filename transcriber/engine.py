@@ -13,8 +13,10 @@ import atexit
 import multiprocessing
 import os
 import shutil
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from pathlib import Path
 
@@ -24,8 +26,15 @@ from .llm import LanguageModelError, SharedLLM, llm_main
 from .worker import worker_main
 
 
-class QueueFull(Exception):
-    """Too many uploads are already waiting."""
+# Loading the speech model can include a multi-gigabyte download the first time.
+_SPEECH_LOAD_TIMEOUT = 3600.0
+
+# Disk space that uploads must leave free: decoded audio and the rest of the Mac need room too.
+_DISK_HEADROOM = 2 * 1024**3
+
+
+class NoRoom(Exception):
+    """Another upload can't be taken right now. The message says why, for whoever is uploading."""
 
 
 class Worker:
@@ -50,14 +59,16 @@ class Engine:
         self._mp = multiprocessing.get_context("spawn")
         self._llm = SharedLLM(self._mp, config.llm_model, config.stall_seconds, config.idle_unload_seconds, llm_main)
 
-        self._cond = threading.Condition()  # guards the four attributes below
+        self._cond = threading.Condition()  # guards the six attributes below
         self._jobs: dict[str, Job] = {}  # web UI jobs, oldest first; API jobs are never kept
         self._pending: deque[Job] = deque()
         self._idle_slots: set[int] = set()
         self._running = 0
+        self._arriving_uploads = 0  # uploads being received right now, which will want a place in the queue
+        self._arriving_bytes = 0
 
-        self.ready = threading.Event()  # set once the first worker has loaded the speech model
-        self.load_error: str | None = None
+        self.ready = threading.Event()  # set once the first worker has started, with or without its model
+        self.load_error: str | None = None  # why the speech model isn't loaded, until a job shows that it is
         self.files_dir = _private_dir(config.work_dir)  # uploads and decoded audio, while their job is alive
 
     def start(self):
@@ -66,16 +77,33 @@ class Engine:
 
     # ------------------------------------------------------------ for the server
 
-    def queue_full(self) -> bool:
+    def reserve(self, size: int):
+        """Make room for an upload of `size` bytes before it is read, or raise NoRoom.
+
+        Call release(size) when the upload has arrived or failed. Counting
+        uploads that are still on their way is what stops many arriving at
+        once from overfilling the queue or the disk between them.
+        """
         with self._cond:
-            return len(self._pending) >= self.config.max_queue
+            if len(self._pending) + self._arriving_uploads >= self.config.max_queue:
+                raise NoRoom("The queue is full. Try again when some jobs have finished.")
+            free = shutil.disk_usage(self.files_dir).free - self._arriving_bytes - _DISK_HEADROOM
+            if size > free:
+                raise NoRoom("The server is short of disk space. Try again when some jobs have finished.")
+            self._arriving_uploads += 1
+            self._arriving_bytes += size
+
+    def release(self, size: int):
+        with self._cond:
+            self._arriving_uploads -= 1
+            self._arriving_bytes -= size
 
     def submit(self, filename: str, path: Path, options: Options, owner: str | None = None) -> Job:
         """Queue a job. Jobs without an owner (API calls) are not kept for the web UI."""
         job = Job(filename=filename, path=path, options=options, owner=owner)
         with self._cond:
-            if len(self._pending) >= self.config.max_queue:
-                raise QueueFull
+            if len(self._pending) >= self.config.max_queue:  # two uploads finished in the same instant
+                raise NoRoom("The queue is full. Try again when some jobs have finished.")
             if owner is not None:
                 self._jobs[job.id] = job
             self._pending.append(job)
@@ -116,17 +144,7 @@ class Engine:
 
     def _slot(self, slot: int):
         """One thread per worker process: start it, feed it jobs, replace it if it breaks."""
-        worker = None
-        if slot == 0:
-            # The first worker stays for the life of the server, and loads
-            # (downloading if need be) the speech model before the first upload.
-            worker = Worker(self._mp, self._worker_main, self.config, slot, preload=True)
-            try:
-                _, self.load_error = worker.conn.recv()
-            except EOFError:
-                self.load_error = "The speech model worker exited during startup."
-            self.ready.set()
-
+        worker = self._first_worker() if slot == 0 else None
         while True:
             job = self._next_job(slot, may_give_up=worker is not None and slot > 0)
             if job is None:
@@ -134,12 +152,40 @@ class Engine:
                 worker.stop()
                 worker = None
                 continue
-            if worker is None or not worker.proc.is_alive():
-                worker = Worker(self._mp, self._worker_main, self.config, slot)
-            if not self._run(job, worker):
+            try:
+                if worker is None or not worker.proc.is_alive():
+                    worker = Worker(self._mp, self._worker_main, self.config, slot)
+                worker_is_fine = self._run(job, worker)
+            except Exception as exc:  # noqa: BLE001 - whatever went wrong, this job fails and the slot lives on
+                traceback.print_exc()
+                job.status, job.error = "error", f"The server could not run this job ({type(exc).__name__}: {exc})."
+                worker_is_fine = False
+            self._finish(job)
+            if not worker_is_fine and worker is not None:
                 worker.stop()
                 worker = None
-            self._finish(job)
+
+    def _first_worker(self) -> Worker | None:
+        """Start the worker that stays for the life of the server, and wait for it to load the speech model.
+
+        Loading here (downloading if need be) means the first upload doesn't
+        have to wait for it. If it fails, `load_error` says why and the server
+        carries on: every job then tries again with a worker of its own.
+        """
+        worker = None
+        try:
+            worker = Worker(self._mp, self._worker_main, self.config, slot=0, preload=True)
+            if not worker.conn.poll(_SPEECH_LOAD_TIMEOUT):
+                raise TimeoutError(f"it did not finish loading within {_SPEECH_LOAD_TIMEOUT / 60:.0f} minutes")
+            _, self.load_error = worker.conn.recv()
+        except Exception as exc:  # noqa: BLE001 - not started, exited, or stuck
+            reason = "its process exited" if isinstance(exc, EOFError) else str(exc)
+            self.load_error = f"Could not load the speech model: {reason}."
+            if worker is not None:
+                worker.stop()
+                worker = None
+        self.ready.set()
+        return worker
 
     def _next_job(self, slot: int, may_give_up: bool) -> Job | None:
         """Wait for a job. With `may_give_up`, returns None after `idle_unload_seconds` without one."""
@@ -178,6 +224,7 @@ class Engine:
                 elif kind == "done":
                     job.result = payload[0]
                     job.status, job.stage, job.progress = "done", "Done", None
+                    self.load_error = None  # a finished job proves the speech model loads, whatever happened at startup
                     return True
                 else:
                     job.status, job.error, job.user_error = "error", *payload
@@ -186,7 +233,7 @@ class Engine:
             job.status, job.error = "error", "The transcription worker crashed while processing this file."
             return False
         finally:
-            wav.unlink(missing_ok=True)  # here rather than in the worker, so a crash can't leave it behind
+            _remove(wav)  # here rather than in the worker, so a crash can't leave it behind
 
     def _ask_llm(self, job: Job, requests: list) -> tuple[list[str] | None, str | None]:
         """Returns (answers, None), or (None, why not)."""
@@ -205,15 +252,25 @@ class Engine:
         return answers, None
 
     def _finish(self, job: Job):
-        job.finished = time.time()
-        job.path.unlink(missing_ok=True)
-        with self._cond:
-            self._running -= 1
-            # Keep each person's newest `max_jobs` finished transcripts.
-            finished = [j for j in self._jobs.values() if j.owner == job.owner and (j.done.is_set() or j is job)]
-            for old in finished[: max(0, len(finished) - self.config.max_jobs)]:
-                del self._jobs[old.id]
-        job.done.set()
+        try:
+            job.finished = time.time()
+            _remove(job.path)
+            with self._cond:
+                self._running -= 1
+                # Keep each person's newest `max_jobs` finished transcripts.
+                finished = [j for j in self._jobs.values() if j.owner == job.owner and (j.done.is_set() or j is job)]
+                for old in finished[: max(0, len(finished) - self.config.max_jobs)]:
+                    del self._jobs[old.id]
+        finally:
+            job.done.set()  # whatever happened above, nobody may be left waiting for this job
+
+
+def _remove(path: Path):
+    """Delete a file if it is there. Failing to must not stop a job from finishing."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"Could not delete {path}: {exc}", file=sys.stderr, flush=True)
 
 
 def _private_dir(work_dir: Path) -> Path:

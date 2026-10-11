@@ -27,6 +27,11 @@ class Turn:
     text: str = ""  # what is shown; clean-up replaces it, with paragraphs separated by blank lines
 
     @property
+    def raw_text(self) -> str:
+        """The turn exactly as transcribed, whatever clean-up has since done to `text`."""
+        return " ".join(sentence.text for sentence in self.sentences)
+
+    @property
     def start(self) -> float:
         return self.sentences[0].start
 
@@ -80,21 +85,33 @@ def build_turns(sentences: list[Sentence]) -> list[Turn]:
         else:
             turns.append(Turn(sentence.speaker, [sentence]))
     for turn in turns:
-        turn.text = " ".join(sentence.text for sentence in turn.sentences)
+        turn.text = turn.raw_text
     return turns
 
 
-def to_result(sentences: list[Sentence], turns: list[Turn], **details) -> dict:
-    """The finished job as plain data, ready to be sent as JSON. formats.py documents the shape."""
+def to_result(sentences: list[Sentence], turns: list[Turn], cleaned: bool, **details) -> dict:
+    """The finished job as plain data, ready to be sent as JSON. formats.py documents the shape.
+
+    `cleaned` says whether clean-up rewrote the turns' text. If it did, each
+    turn also carries its text as transcribed, so the two can be compared.
+    """
     speakers = []
     for turn in turns:
         if turn.speaker and turn.speaker not in speakers:
             speakers.append(turn.speaker)
     return {
         **details,
+        "cleaned": cleaned,
         "speakers": speakers,
         "turns": [
-            {"speaker": turn.speaker, "start": turn.start, "end": turn.end, "text": turn.text} for turn in turns
+            {
+                "speaker": turn.speaker,
+                "start": turn.start,
+                "end": turn.end,
+                "text": turn.text,
+                **({"raw_text": turn.raw_text} if cleaned else {}),
+            }
+            for turn in turns
         ],
         "segments": [
             {"id": i, "start": s.start, "end": s.end, "text": s.text, "speaker": s.speaker, "confidence": s.confidence}

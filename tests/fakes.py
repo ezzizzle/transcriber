@@ -14,6 +14,7 @@ import os
 import time
 from pathlib import Path
 
+from transcriber.llm import Answer
 from transcriber.transcript import Sentence, build_turns, to_result
 
 
@@ -43,20 +44,36 @@ def worker(conn, config, preload):
             if error:
                 warnings.append(f"The summary was skipped. {error}")
             else:
-                summary = {"executive_summary": answers[0], "key_points": [], "action_items": []}
+                summary = {"executive_summary": answers[0].text, "key_points": [], "action_items": []}
 
         sentences = [Sentence(start=0.0, end=1.0, text=text, confidence=1.0, words=[])]
+        turns = build_turns(sentences)
+        if options.cleanup:  # "clean-up" here just takes out every "um"
+            turns[0].text = text.replace("um ", "")
         conn.send(("done", to_result(
-            sentences, build_turns(sentences), duration=1.0, language="unknown", model="fake",
-            diarized=False, cleaned=False, summary=summary, warnings=warnings, timings={"transcribe": 0.01},
+            sentences, turns, cleaned=options.cleanup, duration=1.0, language="unknown", model="fake",
+            diarized=False, summary=summary, warnings=warnings, timings={"transcribe": 0.01},
         )))  # fmt: skip
+
+
+def worker_that_cannot_load_its_model(conn, config, preload):
+    """Reports a failed model load at startup, then works: the trouble has passed by the first job."""
+    if preload:
+        conn.send(("ready", "Could not load speech model: the network is down"))
+    worker(conn, config, preload=False)
+
+
+def worker_that_hangs_at_startup(conn, config, preload):
+    if preload:
+        time.sleep(3600)
+    worker(conn, config, preload=False)
 
 
 def llm(conn, model_id):
     conn.send(("ready", None))
     while True:
         requests = conn.recv()
-        conn.send(("ok", [f"Summary of: {user}" for _, user, _ in requests]))
+        conn.send(("ok", [Answer(f"Summary of: {user}") for _, user, _ in requests]))
 
 
 def llm_that_cannot_load(conn, model_id):
