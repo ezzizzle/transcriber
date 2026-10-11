@@ -113,7 +113,9 @@ Up to `TRANSCRIBER_MAX_PARALLEL` jobs are processed at once; the rest wait in a
 first-come-first-served queue, and the web UI shows each waiting job's place in
 line. API requests share the same queue and simply block until their turn.
 At most `TRANSCRIBER_MAX_QUEUE` uploads may wait; beyond that, new uploads are
-turned away with a 503 until the queue drains.
+turned away with a 503 until the queue drains. Uploads still on their way count
+towards that limit, and an upload is also turned away if it would leave less
+than 2 GB of disk free.
 
 Each parallel job runs in its own worker process with its own speech and
 diarization models, so every extra slot costs memory (see
@@ -139,6 +141,8 @@ nobody waiting behind a long file, not about total throughput.
 - **The speech model fails to load at startup**, or takes more than an hour:
   `/health` reports the error and the server carries on. Each job then tries to
   load it again, and the error clears as soon as one succeeds.
+- **An upload stalls** for a minute: the connection is dropped and the partial
+  file deleted.
 - **Anything unexpected** while starting or finishing a job: that job fails
   with the reason, and the slot goes on to the next one.
 

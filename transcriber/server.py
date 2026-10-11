@@ -16,7 +16,7 @@ from urllib.parse import parse_qs, quote, urlsplit
 
 from . import formats, multipart
 from .config import Config, parse_bool
-from .engine import Engine, QueueFull
+from .engine import Engine, NoRoom
 from .jobs import Job, Options
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -26,6 +26,9 @@ DIARIZATION_MODEL = "senko (pyannote segmentation 3.0 + CAM++)"
 # Set by an authenticating reverse proxy. Only believed when the
 # TRANSCRIBER_TRUST_USER_HEADER setting is on: see README, "Privacy and users".
 USER_HEADER = "X-Forwarded-User"
+
+# A client that sends nothing for this long in the middle of an upload is dropped.
+UPLOAD_STALL_SECONDS = 60
 
 # Model ids advertised on /v1/models. Clients that can't send extra form
 # fields can switch options on by picking a model name instead: any name
@@ -171,9 +174,6 @@ class Handler(BaseHTTPRequestHandler):
 
     def _read_upload(self):
         """Parse the multipart body; returns (fields, Upload for the `file` part)."""
-        if self.engine.queue_full():  # before reading, so a full queue costs no disk space
-            self.close_connection = True
-            raise HTTPError(503, "The queue is full. Try again when some jobs have finished.", "server_error")
         length = self.headers.get("Content-Length")
         if length is None or not length.isdigit():
             self.close_connection = True
@@ -182,17 +182,24 @@ class Handler(BaseHTTPRequestHandler):
         if int(length) > self.config.max_upload_bytes + 1024 * 1024:
             self.close_connection = True
             raise HTTPError(413, f"Upload exceeds the {self.config.max_upload_mb} MB limit")
+        size = int(length)
         try:
+            self.engine.reserve(size)  # before reading, so being turned away costs no disk space
+        except NoRoom as exc:
+            self.close_connection = True
+            raise HTTPError(503, str(exc), "server_error") from None
+        try:
+            self.connection.settimeout(UPLOAD_STALL_SECONDS)
             fields, files = multipart.parse(
-                self.rfile,
-                self.headers.get("Content-Type", ""),
-                int(length),
-                self.engine.files_dir,
-                self.config.max_upload_bytes,
+                self.rfile, self.headers.get("Content-Type", ""), size, self.engine.files_dir, self.config.max_upload_bytes
             )
         except multipart.MultipartError as exc:
             self.close_connection = True
             raise HTTPError(400, f"Bad upload: {exc}") from exc
+        finally:
+            # Also reached when the client stalls or hangs up, which http.server then deals with.
+            self.connection.settimeout(None)
+            self.engine.release(size)
         upload = files.pop("file", None)
         for extra in files.values():
             extra.path.unlink(missing_ok=True)
@@ -205,9 +212,9 @@ class Handler(BaseHTTPRequestHandler):
     def _submit(self, upload, options: Options, owner: str | None = None) -> Job:
         try:
             return self.engine.submit(upload.filename, upload.path, options, owner)
-        except QueueFull:  # it filled up while this upload was arriving
+        except NoRoom as exc:
             upload.path.unlink(missing_ok=True)
-            raise HTTPError(503, "The queue is full. Try again when some jobs have finished.", "server_error") from None
+            raise HTTPError(503, str(exc), "server_error") from None
 
     def _job_or_404(self, job_id: str) -> Job:
         job = self.engine.get(job_id, self._identity())

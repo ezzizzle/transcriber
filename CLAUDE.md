@@ -82,10 +82,14 @@ A finished job's result is a plain dict, documented at the top of
   crashed or killed worker can't leave a recording behind.
 - **Everything that waits has a deadline.** Worker replies, language-model
   replies and ffmpeg give up after `stall_seconds`; the speech model's first
-  load after an hour. Don't add a wait without one.
+  load after an hour; a silent upload after a minute. Don't add a wait without
+  one.
 - **A slot thread must never die.** `Engine._slot` catches whatever goes wrong
   with a job, fails that job and carries on, and `_finish` always sets
   `job.done`. A dead slot means queued jobs that nobody will ever run.
+- **Reserve before reading an upload.** `Engine.reserve` counts uploads that
+  are still arriving against the queue and the free disk space; the server
+  releases the reservation in a `finally`.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

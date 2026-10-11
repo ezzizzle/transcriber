@@ -29,9 +29,12 @@ from .worker import worker_main
 # Loading the speech model can include a multi-gigabyte download the first time.
 _SPEECH_LOAD_TIMEOUT = 3600.0
 
+# Disk space that uploads must leave free: decoded audio and the rest of the Mac need room too.
+_DISK_HEADROOM = 2 * 1024**3
 
-class QueueFull(Exception):
-    """Too many uploads are already waiting."""
+
+class NoRoom(Exception):
+    """Another upload can't be taken right now. The message says why, for whoever is uploading."""
 
 
 class Worker:
@@ -56,11 +59,13 @@ class Engine:
         self._mp = multiprocessing.get_context("spawn")
         self._llm = SharedLLM(self._mp, config.llm_model, config.stall_seconds, config.idle_unload_seconds, llm_main)
 
-        self._cond = threading.Condition()  # guards the four attributes below
+        self._cond = threading.Condition()  # guards the six attributes below
         self._jobs: dict[str, Job] = {}  # web UI jobs, oldest first; API jobs are never kept
         self._pending: deque[Job] = deque()
         self._idle_slots: set[int] = set()
         self._running = 0
+        self._arriving_uploads = 0  # uploads being received right now, which will want a place in the queue
+        self._arriving_bytes = 0
 
         self.ready = threading.Event()  # set once the first worker has started, with or without its model
         self.load_error: str | None = None  # why the speech model isn't loaded, until a job shows that it is
@@ -72,16 +77,33 @@ class Engine:
 
     # ------------------------------------------------------------ for the server
 
-    def queue_full(self) -> bool:
+    def reserve(self, size: int):
+        """Make room for an upload of `size` bytes before it is read, or raise NoRoom.
+
+        Call release(size) when the upload has arrived or failed. Counting
+        uploads that are still on their way is what stops many arriving at
+        once from overfilling the queue or the disk between them.
+        """
         with self._cond:
-            return len(self._pending) >= self.config.max_queue
+            if len(self._pending) + self._arriving_uploads >= self.config.max_queue:
+                raise NoRoom("The queue is full. Try again when some jobs have finished.")
+            free = shutil.disk_usage(self.files_dir).free - self._arriving_bytes - _DISK_HEADROOM
+            if size > free:
+                raise NoRoom("The server is short of disk space. Try again when some jobs have finished.")
+            self._arriving_uploads += 1
+            self._arriving_bytes += size
+
+    def release(self, size: int):
+        with self._cond:
+            self._arriving_uploads -= 1
+            self._arriving_bytes -= size
 
     def submit(self, filename: str, path: Path, options: Options, owner: str | None = None) -> Job:
         """Queue a job. Jobs without an owner (API calls) are not kept for the web UI."""
         job = Job(filename=filename, path=path, options=options, owner=owner)
         with self._cond:
-            if len(self._pending) >= self.config.max_queue:
-                raise QueueFull
+            if len(self._pending) >= self.config.max_queue:  # two uploads finished in the same instant
+                raise NoRoom("The queue is full. Try again when some jobs have finished.")
             if owner is not None:
                 self._jobs[job.id] = job
             self._pending.append(job)

@@ -2,6 +2,7 @@
 
 import http.client
 import json
+import socket
 import tempfile
 import threading
 import time
@@ -12,6 +13,7 @@ from unittest import mock
 from tests import fakes
 from transcriber.config import Config
 from transcriber.engine import Engine
+from transcriber import server as server_module
 from transcriber.server import Handler, Server
 
 
@@ -68,7 +70,7 @@ class ServerTest(unittest.TestCase):
         work_dir = Path(self.enterContext(tempfile.TemporaryDirectory()))
         self.enterContext(mock.patch.object(Handler, "log_message", lambda *args: None))  # keep the test output quiet
         config = Config(host="127.0.0.1", port=0, work_dir=work_dir, max_parallel=1, **settings)
-        engine = Engine(config, worker_main=worker, llm_main=fakes.llm)
+        engine = self.engine = Engine(config, worker_main=worker, llm_main=fakes.llm)
         server = Server(config, engine)
         engine.start()
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -151,6 +153,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(status, 202)
         self.assertEqual(browser.upload("/api/jobs", "third")[0], 503)
         self.assertEqual([browser.wait(job)["status"] for job in (first, second)], ["done", "done"])
+
+    def test_an_upload_that_stalls_is_dropped_and_frees_its_place(self):
+        with mock.patch.object(server_module, "UPLOAD_STALL_SECONDS", 0.5):
+            port = self.serve(max_queue=1)
+            stalled = socket.create_connection(("127.0.0.1", port), timeout=10)
+            stalled.sendall(
+                b"POST /api/jobs HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\n"
+                b"Content-Length: 100000\r\n\r\n"
+                b'--b\r\nContent-Disposition: form-data; name="file"; filename="talk.mp3"\r\n\r\nthe first few bytes'
+            )
+            time.sleep(0.2)
+            self.assertEqual(Browser(port).upload("/api/jobs", "hello")[0], 503)  # the only place is taken
+            self.assertEqual(stalled.recv(1000), b"")  # the server gives up and hangs up
+            stalled.close()
+        self.assertEqual(list(self.engine.files_dir.iterdir()), [])  # nothing of the partial upload is kept
+        self.assertEqual(Browser(port).upload_and_wait("hello")["status"], "done")  # and its place is free again
 
     def test_health(self):
         status, health = Browser(self.serve()).get("/health")

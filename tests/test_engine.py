@@ -5,12 +5,13 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from tests import fakes
 from transcriber import engine as engine_module
 from transcriber.config import Config
-from transcriber.engine import Engine, QueueFull, _private_dir
+from transcriber.engine import Engine, NoRoom, _private_dir
 from transcriber.jobs import Job, Options
 
 
@@ -48,11 +49,33 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(engine.job_status(first)["queue_position"], None)
         self.assertEqual(engine.job_status(second)["queue_position"], 1)
         self.assertEqual(engine.job_status(third)["queue_position"], 2)
-        self.assertTrue(engine.queue_full())
-        with self.assertRaises(QueueFull):
+        with self.assertRaises(NoRoom):
+            engine.reserve(size=1000)
+        with self.assertRaises(NoRoom):
             self.submit(engine, "four")
         self.assertEqual([self.finish(j).status for j in (first, second, third)], ["done"] * 3)
         self.assertLess(second.started, third.started)  # first come, first served
+
+    def test_uploads_still_arriving_count_against_the_queue(self):
+        engine = self.engine(max_queue=2)
+        engine.reserve(size=1000)
+        engine.reserve(size=1000)
+        with self.assertRaises(NoRoom) as refused:
+            engine.reserve(size=1000)
+        self.assertIn("queue is full", str(refused.exception))
+        engine.release(size=1000)  # one of them failed or arrived
+        engine.reserve(size=1000)
+
+    def test_uploads_are_refused_when_the_disk_is_nearly_full(self):
+        engine = self.engine()
+        gb = 1024**3
+        with mock.patch.object(engine_module.shutil, "disk_usage", return_value=SimpleNamespace(free=5 * gb)):
+            engine.reserve(size=2 * gb)  # leaves 3 GB, of which 2 GB must stay free
+            with self.assertRaises(NoRoom) as refused:
+                engine.reserve(size=2 * gb)  # the first is still arriving, so its bytes are spoken for
+            self.assertIn("disk space", str(refused.exception))
+            engine.release(size=2 * gb)
+            engine.reserve(size=2 * gb)
 
     def test_two_jobs_run_at_once_when_allowed(self):
         engine = self.engine(max_parallel=2)
