@@ -230,6 +230,10 @@ original alongside:
 - The API's JSON formats give the cleaned-up `text`; their `segments` and
   `words` are always the raw transcription.
 
+A turn that was nothing but filler ("Um.") is removed by clean-up altogether,
+so there is no turn left to compare. It is still in the whole-transcript
+`raw_text` and in `segments`.
+
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished

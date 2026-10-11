@@ -197,7 +197,10 @@ class CleanupTest(unittest.TestCase):
         result = to_result([s for turn in turns for s in turn.sentences], cleaned, cleaned=True)
         self.assertEqual(result["turns"][0]["text"], f"Word {long[5:]}.\n\nOkay, thanks.")
         self.assertEqual(result["turns"][0]["raw_text"], f"Um, {long}. Okay, uh, thanks.")
-        self.assertEqual(formats.to_text({**result, "diarized": True}, "raw_text"), f"Speaker 1: Um, {long}. Okay, uh, thanks.")
+        # The whole transcript as transcribed still has the turn that clean-up dropped.
+        self.assertEqual(formats.raw_text({**result, "diarized": True}),
+                         f"Speaker 1: Um, {long}.\n\nSpeaker 2: Um.\n\nSpeaker 1: Okay, uh, thanks.")
+        self.assertEqual(formats.raw_text({**result, "diarized": False}), f"Um, {long}.\n\nUm.\n\nOkay, uh, thanks.")
 
 
 class CompareTest(unittest.TestCase):
@@ -230,10 +233,14 @@ class CompareTest(unittest.TestCase):
 
     def test_the_json_download_carries_all_three_versions(self):
         turn = {"speaker": "Speaker 1", "start": 0.0, "end": 2.0, "text": "So, hello.", "raw_text": "um so hello"}
-        result = {"diarized": True, "cleaned": True, "turns": [turn]}
+        segments = [  # as transcribed: Speaker 2 only said "um", so clean-up left no turn for them
+            {"speaker": "Speaker 1", "text": "um so hello"},
+            {"speaker": "Speaker 2", "text": "um"},
+        ]
+        result = {"diarized": True, "cleaned": True, "turns": [turn], "segments": segments}
         whole = json.loads(formats.to_full_json(result))
         self.assertEqual(whole["text"], "Speaker 1: So, hello.")
-        self.assertEqual(whole["raw_text"], "Speaker 1: um so hello")
+        self.assertEqual(whole["raw_text"], "Speaker 1: um so hello\n\nSpeaker 2: um")  # everything that was said
         self.assertEqual(whole["changes"], "Speaker 1: ~~um~~ So, hello.")
         self.assertEqual(whole["turns"][0]["changes"], "~~um~~ So, hello.")
         self.assertNotIn("changes", turn)  # worked out for the download, not stored with the job

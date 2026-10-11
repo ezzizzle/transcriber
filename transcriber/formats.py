@@ -45,12 +45,30 @@ def clock(seconds: float) -> str:
 def to_text(result: dict, version: str = "text") -> str:
     """Plain text. Speaker turns are prefixed with "Speaker N:" when diarized.
 
-    `version` is which form of each turn to use. Every turn has "text"; the
-    turns of a cleaned-up transcript also have "raw_text".
+    `version` is which form of each turn to use: "text" unless a caller has
+    given the turns another, as to_full_json does.
     """
     if not result["diarized"]:
         return "\n\n".join(t[version] for t in result["turns"])
     return "\n\n".join(f"{t['speaker']}: {t[version]}" for t in result["turns"])
+
+
+def raw_text(result: dict) -> str:
+    """The whole transcript exactly as transcribed, laid out like to_text.
+
+    It is put together from the segments rather than the turns, because
+    clean-up drops a turn that was nothing but filler ("Um."). That turn was
+    said, so it belongs here, and it no longer has a turn of its own.
+    """
+    said: list[tuple[str | None, list[str]]] = []  # (speaker, sentences) for each run by one speaker
+    for segment in result["segments"]:
+        if said and said[-1][0] == segment["speaker"]:
+            said[-1][1].append(segment["text"])
+        else:
+            said.append((segment["speaker"], [segment["text"]]))
+    if not result["diarized"]:
+        return "\n\n".join(" ".join(sentences) for _, sentences in said)
+    return "\n\n".join(f"{speaker}: {' '.join(sentences)}" for speaker, sentences in said)
 
 
 def extras(result: dict) -> dict:
@@ -191,11 +209,14 @@ def to_full_json(result: dict) -> str:
     `text` as cleaned, `raw_text` as transcribed, and `changes`, which is the
     cleaned text in Markdown with what clean-up ~~took out~~ and **put in**,
     for a person who wants to check it.
+
+    A turn that was nothing but filler has no turn left to compare: clean-up
+    removed it. It is still in the whole `raw_text` and in the segments.
     """
     whole = {"text": to_text(result)}
     if result.get("cleaned"):
         turns = [{**turn, "changes": compare.as_markdown(turn["raw_text"], turn["text"])} for turn in result["turns"]]
         result = {**result, "turns": turns}
-        whole["raw_text"] = to_text(result, "raw_text")
+        whole["raw_text"] = raw_text(result)
         whole["changes"] = to_text(result, "changes")
     return json.dumps({**whole, **result}, indent=2, ensure_ascii=False) + "\n"
