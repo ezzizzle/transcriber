@@ -14,7 +14,7 @@ from pathlib import Path
 from socketserver import TCPServer
 from urllib.parse import parse_qs, quote, urlsplit
 
-from . import formats, multipart
+from . import compare, formats, multipart
 from .config import Config, parse_bool
 from .engine import Engine, NoRoom
 from .jobs import Job, Options
@@ -149,6 +149,7 @@ class Handler(BaseHTTPRequestHandler):
             (r"/api/jobs", self.get_jobs),
             (r"/api/jobs/(\w+)", self.get_job),
             (r"/api/jobs/(\w+)/download", self.get_download),
+            (r"/api/jobs/(\w+)/comparison", self.get_comparison),
         ])  # fmt: skip
 
     do_HEAD = do_GET
@@ -326,6 +327,19 @@ class Handler(BaseHTTPRequestHandler):
         stem = Path(job.filename).stem or "transcript"
         disposition = f"attachment; filename*=UTF-8''{quote(f'{stem}.{fmt}')}"
         self._send(200, render(job.result, stem), content_type, {"Content-Disposition": disposition})
+
+    def get_comparison(self, job_id):
+        """What clean-up changed in each turn, for the page's "Show changes"."""
+        job = self._job_or_404(job_id)
+        if job.result is None:
+            raise HTTPError(409, "Job has not finished")
+        if not job.result["cleaned"]:
+            raise HTTPError(400, "This transcript was not cleaned up, so there is nothing to compare.")
+        turns = [
+            {"speaker": t["speaker"], "start": t["start"], "changes": compare.changes(t["raw_text"], t["text"])}
+            for t in job.result["turns"]
+        ]
+        self._json(200, {"turns": turns})
 
     def delete_job(self, job_id):
         self._job_or_404(job_id)

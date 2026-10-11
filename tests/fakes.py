@@ -47,9 +47,12 @@ def worker(conn, config, preload):
                 summary = {"executive_summary": answers[0].text, "key_points": [], "action_items": []}
 
         sentences = [Sentence(start=0.0, end=1.0, text=text, confidence=1.0, words=[])]
+        turns = build_turns(sentences)
+        if options.cleanup:  # "clean-up" here just takes out every "um"
+            turns[0].text = text.replace("um ", "")
         conn.send(("done", to_result(
-            sentences, build_turns(sentences), duration=1.0, language="unknown", model="fake",
-            diarized=False, cleaned=False, summary=summary, warnings=warnings, timings={"transcribe": 0.01},
+            sentences, turns, cleaned=options.cleanup, duration=1.0, language="unknown", model="fake",
+            diarized=False, summary=summary, warnings=warnings, timings={"transcribe": 0.01},
         )))  # fmt: skip
 
 

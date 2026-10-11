@@ -7,7 +7,7 @@ A result is a plain dict:
       "diarized": bool, "cleaned": bool, "speakers": [str],
       "segments": [{"id", "start", "end", "text", "speaker"|None, "confidence"}],
       "words":    [{"word", "start", "end", "speaker"|None}],
-      "turns":    [{"speaker"|None, "start", "end", "text"}],
+      "turns":    [{"speaker"|None, "start", "end", "text", "raw_text" if cleaned}],
       "summary":  {"executive_summary": str, "key_points": [str], "action_items": [str]} | None,
       "warnings": [str],             # optional stages that failed or may be incomplete
       "timings":  {stage: seconds},  # see jobs.STAGE_KEYS
@@ -16,8 +16,9 @@ A result is a plain dict:
 It is built in transcript.to_result.
 
 Segments and words always carry the raw transcription (they have timestamps).
-Turns are consecutive segments by one speaker; their text is what the cleanup
-pass rewrites, with paragraphs separated by blank lines.
+Turns are consecutive segments by one speaker; their `text` is what clean-up
+rewrites, with paragraphs separated by blank lines. When it has, `raw_text`
+is the same turn as transcribed.
 """
 
 import json
@@ -39,11 +40,15 @@ def clock(seconds: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def to_text(result: dict) -> str:
-    """Plain text. Speaker turns are prefixed with "Speaker N:" when diarized."""
+def to_text(result: dict, version: str = "text") -> str:
+    """Plain text. Speaker turns are prefixed with "Speaker N:" when diarized.
+
+    `version` is which form of each turn to use. Every turn has "text"; the
+    turns of a cleaned-up transcript also have "raw_text".
+    """
     if not result["diarized"]:
-        return "\n\n".join(t["text"] for t in result["turns"])
-    return "\n\n".join(f"{t['speaker']}: {t['text']}" for t in result["turns"])
+        return "\n\n".join(t[version] for t in result["turns"])
+    return "\n\n".join(f"{t['speaker']}: {t[version]}" for t in result["turns"])
 
 
 def extras(result: dict) -> dict:
@@ -178,5 +183,12 @@ def to_diarized_json(result: dict) -> dict:
 
 
 def to_full_json(result: dict) -> str:
-    """Everything we know, for the web UI's JSON download."""
-    return json.dumps({"text": to_text(result), **result}, indent=2, ensure_ascii=False) + "\n"
+    """Everything we know, for the web UI's JSON download.
+
+    A cleaned-up transcript is there twice, both whole and turn by turn:
+    `text` as cleaned and `raw_text` as transcribed.
+    """
+    whole = {"text": to_text(result)}
+    if result.get("cleaned"):
+        whole["raw_text"] = to_text(result, "raw_text")
+    return json.dumps({**whole, **result}, indent=2, ensure_ascii=False) + "\n"

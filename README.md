@@ -208,6 +208,22 @@ so its output gets a final pattern-matching sweep that removes any remaining
 "um", "uh", "er", "ah" and "hmm". Phrases such as "you know" and "like" are left
 to the model, since a pattern can't tell when they carry meaning.
 
+#### Checking what clean-up changed
+
+Clean-up is done by a language model, and the only automatic check on its work
+is that the result is about the right length. That would not notice a changed
+name or number, or a dropped "not". So a cleaned-up transcript keeps the
+original alongside:
+
+- In the web UI, **Show changes** marks the transcript with what clean-up did:
+  filler sounds it removed are greyed and struck through, other words it
+  removed are struck through in red, and words it added or changed are
+  highlighted. Capitals and punctuation are not compared.
+- The JSON download has both versions: `text` and `raw_text` for the whole
+  transcript, and the same pair on every turn.
+- The API's JSON formats give the cleaned-up `text`; their `segments` and
+  `words` are always the raw transcription.
+
 ### Key points and action items
 
 With `summary=true` the same local model that does clean-up reads the finished
@@ -328,6 +344,7 @@ transcriber/
   transcript.py   sentences, speakers and turns; builds the result
   cleanup.py      clean-up: fillers, passages, paragraphs
   summary.py      executive summary, key points, action items
+  compare.py      what clean-up changed, word by word
   prompts.py      the instructions given to the language model
   llm.py          the language model's process, and the server's handle on it
   formats.py      text / Markdown / SRT / VTT / JSON renderers

@@ -13,8 +13,14 @@ from .prompts import CLEANUP_PROMPT
 from .transcript import Turn
 
 # Filler sounds as whole words. The hyphen guards keep "uh-huh" and "mm-hmm", which mean something.
-_FILLER = r"(?<![\w-])(?:u+h+m*|u+m+|e+r+m*|a+h+|h+m+)(?![\w-])"
+_FILLER_SOUND = r"(?:u+h+m*|u+m+|e+r+m*|a+h+|h+m+)"
+_FILLER = rf"(?<![\w-]){_FILLER_SOUND}(?![\w-])"
 _MIN_LLM_WORDS = 12
+
+
+def is_filler(word: str) -> bool:
+    """Whether a single word is one of the sounds strip_fillers removes."""
+    return bool(re.fullmatch(_FILLER, word.strip(".,;:!?…").lower()))
 
 
 def strip_fillers(text: str) -> str:

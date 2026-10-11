@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
-from transcriber import cleanup, formats, summary
+from transcriber import cleanup, compare, formats, summary
 from transcriber.audio import pause_before
 from transcriber.jobs import Job, Options
 from transcriber.llm import Answer
@@ -53,8 +53,8 @@ class TranscriptTest(unittest.TestCase):
                          [("Speaker 1", "Hi. How are you?"), ("Speaker 2", "Good."), ("Speaker 1", "Great.")])
         self.assertEqual((turns[0].start, turns[0].end), (0.0, 6.0))
 
-        result = to_result(sentences, turns, duration=12.0)
-        self.assertEqual(result["duration"], 12.0)
+        result = to_result(sentences, turns, cleaned=False, duration=12.0)
+        self.assertEqual((result["duration"], result["cleaned"]), (12.0, False))
         self.assertEqual(result["speakers"], ["Speaker 1", "Speaker 2"])
         self.assertEqual(result["turns"][0], {"speaker": "Speaker 1", "start": 0.0, "end": 6.0, "text": "Hi. How are you?"})
         self.assertEqual(result["segments"][2],
@@ -104,6 +104,7 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(cleanup.strip_fillers("Um, yeah, uh, sure."), "Yeah, sure.")
         self.assertEqual(cleanup.strip_fillers("Umm."), "")
         self.assertEqual(cleanup.strip_fillers("The summer hummed."), "The summer hummed.")
+        self.assertEqual([w for w in "Um, uh-huh. Er hmm, the summer".split() if cleanup.is_filler(w)], ["Um,", "Er", "hmm,"])
         for before, after in [
             ("Anyway, um, the database migration: are we still saying March?", "Anyway, the database migration: are we still saying March?"),
             ("It started at ten past two, and, uh, nobody noticed.", "It started at ten past two, and nobody noticed."),
@@ -190,6 +191,34 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(cleaned[0].text, f"Word {long[5:]}.\n\nOkay, thanks.")
         self.assertEqual((cleaned[0].start, cleaned[0].end), (0, 9))
         self.assertEqual(turns[0].text, f"Um, {long}.")  # the originals are left alone
+
+        # The result carries both versions of every turn, so they can be compared.
+        result = to_result([s for turn in turns for s in turn.sentences], cleaned, cleaned=True)
+        self.assertEqual(result["turns"][0]["text"], f"Word {long[5:]}.\n\nOkay, thanks.")
+        self.assertEqual(result["turns"][0]["raw_text"], f"Um, {long}. Okay, uh, thanks.")
+        self.assertEqual(formats.to_text({**result, "diarized": True}, "raw_text"), f"Speaker 1: Um, {long}. Okay, uh, thanks.")
+
+
+class CompareTest(unittest.TestCase):
+    def test_what_clean_up_changed(self):
+        raw = "um so we we shipped it on the fourteenth. it does not work on android"
+        cleaned = "So, we shipped it on the 14th.\n\nIt does work on Android."
+        self.assertEqual(compare.changes(raw, cleaned), [
+            ["filler", "um"],
+            ["same", "So,"],  # capitals and punctuation are not differences
+            ["removed", "we"],  # said twice
+            ["same", "we shipped it on the"],
+            ["removed", "fourteenth."],
+            ["added", "14th."],  # a number written differently: worth a glance
+            ["break", ""],
+            ["same", "It does"],
+            ["removed", "not"],  # and this is the kind of thing the comparison is for
+            ["same", "work on Android."],
+        ])  # fmt: skip
+
+    def test_nothing_changed(self):
+        self.assertEqual(compare.changes("Thanks, all.", "Thanks, all."), [["same", "Thanks, all."]])
+        self.assertEqual(compare.changes("okay — right", "Okay, right."), [["same", "Okay, right."]])  # a lone dash is not a word
 
 
 class SummaryTest(unittest.TestCase):

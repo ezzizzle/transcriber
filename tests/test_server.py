@@ -95,6 +95,28 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(browser.request("DELETE", f"/api/jobs/{job['id']}")[0], 200)
         self.assertEqual(browser.get("/api/jobs")[1]["jobs"], [])
 
+    def test_raw_and_cleaned_text_can_be_compared(self):
+        browser = Browser(self.serve())
+        job = browser.upload_and_wait("um so um we shipped it", cleanup="true")
+        self.assertTrue(job["cleaned"])
+        turn = job["result"]["turns"][0]
+        self.assertEqual((turn["text"], turn["raw_text"]), ("so we shipped it", "um so um we shipped it"))
+
+        status, comparison = browser.get(f"/api/jobs/{job['id']}/comparison")
+        self.assertEqual(status, 200)
+        self.assertEqual(comparison["turns"][0]["changes"],
+                         [["filler", "um"], ["same", "so"], ["filler", "um"], ["same", "we shipped it"]])
+
+        _, whole = browser.get(f"/api/jobs/{job['id']}/download?format=json")
+        self.assertEqual((whole["text"], whole["raw_text"]), ("so we shipped it", "um so um we shipped it"))
+
+        # Nothing to compare when clean-up wasn't asked for, and nobody else may look.
+        plain = browser.upload_and_wait("um hello")
+        self.assertFalse(plain["cleaned"])
+        self.assertNotIn("raw_text", plain["result"]["turns"][0])
+        self.assertEqual(browser.get(f"/api/jobs/{plain['id']}/comparison")[0], 400)
+        self.assertEqual(Browser(browser.port).get(f"/api/jobs/{job['id']}/comparison")[0], 404)
+
     def test_one_browser_cannot_see_anothers_transcripts(self):
         port = self.serve()
         alice, bob = Browser(port), Browser(port)
