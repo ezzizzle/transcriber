@@ -83,6 +83,9 @@ A finished job's result is a plain dict, documented at the top of
 - **Everything that waits has a deadline.** Worker replies, language-model
   replies and ffmpeg all give up after `stall_seconds`. Don't add a wait
   without one.
+- **A slot thread must never die.** `Engine._slot` catches whatever goes wrong
+  with a job, fails that job and carries on, and `_finish` always sets
+  `job.done`. A dead slot means queued jobs that nobody will ever run.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

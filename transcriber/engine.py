@@ -13,8 +13,10 @@ import atexit
 import multiprocessing
 import os
 import shutil
+import sys
 import threading
 import time
+import traceback
 from collections import deque
 from pathlib import Path
 
@@ -134,12 +136,18 @@ class Engine:
                 worker.stop()
                 worker = None
                 continue
-            if worker is None or not worker.proc.is_alive():
-                worker = Worker(self._mp, self._worker_main, self.config, slot)
-            if not self._run(job, worker):
+            try:
+                if worker is None or not worker.proc.is_alive():
+                    worker = Worker(self._mp, self._worker_main, self.config, slot)
+                worker_is_fine = self._run(job, worker)
+            except Exception as exc:  # noqa: BLE001 - whatever went wrong, this job fails and the slot lives on
+                traceback.print_exc()
+                job.status, job.error = "error", f"The server could not run this job ({type(exc).__name__}: {exc})."
+                worker_is_fine = False
+            self._finish(job)
+            if not worker_is_fine and worker is not None:
                 worker.stop()
                 worker = None
-            self._finish(job)
 
     def _next_job(self, slot: int, may_give_up: bool) -> Job | None:
         """Wait for a job. With `may_give_up`, returns None after `idle_unload_seconds` without one."""
@@ -186,7 +194,7 @@ class Engine:
             job.status, job.error = "error", "The transcription worker crashed while processing this file."
             return False
         finally:
-            wav.unlink(missing_ok=True)  # here rather than in the worker, so a crash can't leave it behind
+            _remove(wav)  # here rather than in the worker, so a crash can't leave it behind
 
     def _ask_llm(self, job: Job, requests: list) -> tuple[list[str] | None, str | None]:
         """Returns (answers, None), or (None, why not)."""
@@ -205,15 +213,25 @@ class Engine:
         return answers, None
 
     def _finish(self, job: Job):
-        job.finished = time.time()
-        job.path.unlink(missing_ok=True)
-        with self._cond:
-            self._running -= 1
-            # Keep each person's newest `max_jobs` finished transcripts.
-            finished = [j for j in self._jobs.values() if j.owner == job.owner and (j.done.is_set() or j is job)]
-            for old in finished[: max(0, len(finished) - self.config.max_jobs)]:
-                del self._jobs[old.id]
-        job.done.set()
+        try:
+            job.finished = time.time()
+            _remove(job.path)
+            with self._cond:
+                self._running -= 1
+                # Keep each person's newest `max_jobs` finished transcripts.
+                finished = [j for j in self._jobs.values() if j.owner == job.owner and (j.done.is_set() or j is job)]
+                for old in finished[: max(0, len(finished) - self.config.max_jobs)]:
+                    del self._jobs[old.id]
+        finally:
+            job.done.set()  # whatever happened above, nobody may be left waiting for this job
+
+
+def _remove(path: Path):
+    """Delete a file if it is there. Failing to must not stop a job from finishing."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        print(f"Could not delete {path}: {exc}", file=sys.stderr, flush=True)
 
 
 def _private_dir(work_dir: Path) -> Path:

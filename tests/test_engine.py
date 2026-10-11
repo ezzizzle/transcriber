@@ -5,8 +5,10 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from tests import fakes
+from transcriber import engine as engine_module
 from transcriber.config import Config
 from transcriber.engine import Engine, QueueFull, _private_dir
 from transcriber.jobs import Job, Options
@@ -76,6 +78,33 @@ class EngineTest(unittest.TestCase):
         engine = self.engine(stall_seconds=1)
         stuck = self.finish(self.submit(engine, "hang"))
         self.assertIn("stopped responding", stuck.error)
+        self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+
+    def test_a_job_the_server_cannot_start_fails_without_taking_the_slot_with_it(self):
+        engine = self.engine()
+        self.finish(self.submit(engine, "crash"))  # so that the next job needs a new worker
+
+        start_worker, failures = engine_module.Worker, [OSError("cannot start a process")]
+
+        def flaky(*args, **kwargs):
+            if failures:
+                raise failures.pop()
+            return start_worker(*args, **kwargs)
+
+        with mock.patch.object(engine_module, "Worker", flaky), mock.patch("traceback.print_exc"):
+            failed = self.finish(self.submit(engine, "unlucky"))
+            self.assertEqual(failed.status, "error")
+            self.assertIn("cannot start a process", failed.error)
+            self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
+        self.assertEqual(engine.stats()["running"], 0)
+
+    def test_a_file_that_cannot_be_deleted_does_not_stop_the_job_finishing(self):
+        engine = self.engine()
+        with mock.patch.object(engine_module.Path, "unlink", side_effect=PermissionError("locked")), \
+                mock.patch.object(engine_module.sys, "stderr"):
+            job = self.finish(self.submit(engine, "hello there"))
+        self.assertEqual(job.status, "done")
+        self.assertEqual(engine.stats()["running"], 0)
         self.assertEqual(self.finish(self.submit(engine, "still working")).status, "done")
 
     def test_the_language_model_is_reached_through_the_engine(self):
