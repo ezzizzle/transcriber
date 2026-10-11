@@ -218,7 +218,8 @@ original alongside:
 - In the web UI, **Show changes** marks the transcript with what clean-up did:
   filler sounds it removed are greyed and struck through, other words it
   removed are struck through in red, and words it added or changed are
-  highlighted. Capitals and punctuation are not compared.
+  highlighted. Capitals and punctuation are not compared, except inside a
+  number: "1.5%" becoming "15%" is shown as a change.
 - The JSON download has three versions, for the whole transcript and again on
   every turn: `text` as cleaned up, `raw_text` as transcribed, and `changes`.
   `changes` is the cleaned-up text written in Markdown for a person to read,

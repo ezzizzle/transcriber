@@ -98,7 +98,8 @@ A finished job's result is a plain dict, documented at the top of
   transcript carries `raw_text`, and `compare.changes` is how a person checks
   the model's work: the page's "Show changes" and the `changes` Markdown in
   the JSON download are both made from it. Nothing automatic can tell a fixed
-  typo from a changed name.
+  typo from a changed name. The comparison ignores punctuation except inside
+  numbers, where it changes the meaning.
 - **Timestamps carry raw text.** Clean-up rewrites the text of turns only.
   Segments, words, SRT and VTT stay as transcribed, because cleaned text no
   longer lines up with the timings.

@@ -241,6 +241,17 @@ class CompareTest(unittest.TestCase):
         plain = json.loads(formats.to_full_json({"diarized": False, "cleaned": False, "turns": [{"speaker": None, "text": "um so hello"}]}))
         self.assertEqual(sorted(plain), ["cleaned", "diarized", "text", "turns"])
 
+    def test_a_changed_number_is_never_hidden(self):
+        # Punctuation inside a number is part of the number.
+        for before, after in [("1.5%", "15%"), ("-5", "5"), ("1/2", "12"), (".5", "5"), ("$5", "5"), ("3:30", "330")]:
+            self.assertEqual(
+                compare.changes(f"it was {before} overall", f"It was {after} overall."),
+                [["same", "It was"], ["removed", before], ["added", after], ["same", "overall."]],
+            )
+        # Punctuation around one is not: the end of a sentence, a quotation, brackets.
+        for before, after in [("14th.", "14th"), ("42,000,", "42,000"), ("(2025)", "2025"), ("1.5%.", '"1.5%"')]:
+            self.assertEqual(compare.changes(f"on the {before} then", f"On the {after} then"), [["same", f"On the {after} then"]])
+
     def test_nothing_changed(self):
         self.assertEqual(compare.changes("Thanks, all.", "Thanks, all."), [["same", "Thanks, all."]])
         self.assertEqual(compare.changes("okay — right", "Okay, right."), [["same", "Okay, right."]])  # a lone dash is not a word

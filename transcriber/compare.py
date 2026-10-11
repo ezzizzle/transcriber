@@ -25,7 +25,8 @@ def changes(raw: str, cleaned: str) -> list[list[str]]:
 
     Fillers and removed words are not part of the cleaned text. Capital
     letters and punctuation are ignored when comparing, because clean-up
-    changes those all the time, on purpose.
+    changes those all the time, on purpose. Punctuation inside a number is
+    not ignored: see _comparable.
     """
     raw_words = raw.split()
     cleaned_words, paragraph_starts = [], set()
@@ -47,15 +48,15 @@ def changes(raw: str, cleaned: str) -> list[list[str]]:
             if i in paragraph_starts:
                 pieces.append(["break", ""])
             # A dash or other stray punctuation on its own is not a change worth pointing out.
-            add(kind if _letters(cleaned_words[i]) else "same", cleaned_words[i])
+            add(kind if _comparable(cleaned_words[i]) else "same", cleaned_words[i])
 
-    matcher = difflib.SequenceMatcher(None, [_letters(w) for w in raw_words], [_letters(w) for w in cleaned_words])
+    matcher = difflib.SequenceMatcher(None, [_comparable(w) for w in raw_words], [_comparable(w) for w in cleaned_words])
     for operation, raw_start, raw_end, cleaned_start, cleaned_end in matcher.get_opcodes():
         if operation == "equal":
             add_cleaned("same", cleaned_start, cleaned_end)
         else:  # words replaced, taken out or put in
             for word in raw_words[raw_start:raw_end]:
-                if _letters(word):
+                if _comparable(word):
                     add("filler" if is_filler(word) else "removed", word)
             add_cleaned("added", cleaned_start, cleaned_end)
     return pieces
@@ -82,6 +83,20 @@ def as_markdown(raw: str, cleaned: str) -> str:
     return "\n\n".join(" ".join(paragraph) for paragraph in paragraphs)
 
 
-def _letters(word: str) -> str:
-    """A word as it is compared: lower case, with punctuation stripped."""
-    return re.sub(r"\W", "", word.lower())
+# Punctuation that wraps a word or ends a sentence, rather than being part of a number.
+_OPENING = "\"'“‘([{"
+_CLOSING = "\"'”’)]}.,;:!?…"
+
+
+def _comparable(word: str) -> str:
+    """A word as it is compared: lower case and without punctuation, so "So," matches "so".
+
+    A number keeps the punctuation inside it, because there it carries
+    meaning: "1.5%" is not "15%", "-5" is not "5" and "1/2" is not "12". Only
+    what wraps a number or ends the sentence is ignored, so "14th." still
+    matches "14th".
+    """
+    word = word.lower()
+    if any(character.isdigit() for character in word):
+        return word.lstrip(_OPENING).rstrip(_CLOSING)
+    return re.sub(r"\W", "", word)

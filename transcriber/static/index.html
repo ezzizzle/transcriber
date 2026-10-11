@@ -214,7 +214,7 @@ function makeRow(id) {
     el("del", { className: "filler", textContent: "filler removed" }),
     el("del", { textContent: "other words removed" }),
     el("ins", { textContent: "words added or changed" }),
-    "Capitals and punctuation are not compared.");
+    "Capitals and punctuation are not compared, except inside numbers.");
   row.turnsBox = el("div");
   row.summaryBox = el("div");
   row.transcript = el("div", { className: "transcript", hidden: true }, row.changesKey, row.turnsBox, row.summaryBox);
