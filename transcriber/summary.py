@@ -7,6 +7,7 @@ model's answers are Markdown, which is taken apart here into plain data.
 
 import re
 
+from .llm import LanguageModelError
 from .prompts import EXECUTIVE_PROMPT, summary_prompt
 
 # Roughly 50 minutes of speech; comfortably inside the model's context window.
@@ -111,8 +112,10 @@ def summarize(ask_many, blocks: list[str], diarized: bool, progress=lambda fract
 
     Returns (summary, problems). The summary is {"executive_summary": str,
     "key_points": [str], "action_items": [str]}, or None if nothing usable
-    came back. `problems` are things the reader should be told, such as an
-    answer that was cut short and may be missing items.
+    came back. `problems` are things the reader should be told: an answer
+    that was cut short and may be missing items, or a step the language model
+    failed at. A failed step costs only that step; whatever else was written
+    is kept.
     """
 
     def ask(system: str, user: str, max_tokens: int):
@@ -121,9 +124,15 @@ def summarize(ask_many, blocks: list[str], diarized: bool, progress=lambda fract
     parts = split_for_summary(blocks)
     key_points, action_items, problems = [], [], []
     for number, part in enumerate(parts, 1):
-        answer = ask(summary_prompt(diarized), f"<transcript>\n{part}\n</transcript>", 2000)
-        progress(number / (len(parts) + 1))  # the last step is the executive summary
         where = f" for part {number} of {len(parts)} of the recording" if len(parts) > 1 else ""
+        try:
+            answer = ask(summary_prompt(diarized), f"<transcript>\n{part}\n</transcript>", 2000)
+        except LanguageModelError as exc:
+            # Carry on: the other parts are still worth having.
+            problems.append(f"The summary{where} is missing. {exc}")
+            continue
+        finally:
+            progress(number / (len(parts) + 1))  # the last step is the executive summary
         found = parse_summary(answer.text)
         if found is None:
             problems.append(f"The summary{where} could not be read from the language model's answer.")
@@ -138,16 +147,30 @@ def summarize(ask_many, blocks: list[str], diarized: bool, progress=lambda fract
     if not diarized:
         action_items = [unassign_unknown_speaker(item) for item in action_items]
     summary = {"executive_summary": "", "key_points": key_points, "action_items": action_items}
-    summary["executive_summary"] = executive_summary(ask, summary)
+
+    # The executive summary is written last, from the lists above. Those are
+    # finished, and worth having whatever happens to this final step.
+    try:
+        answer = ask(EXECUTIVE_PROMPT, f"<notes>\n{_notes(summary)}\n</notes>", 300)
+    except LanguageModelError as exc:
+        problems.append(f"The executive summary is missing. {exc}")
+    else:
+        summary["executive_summary"] = _prose(answer.text)
+        if answer.cut_off:
+            problems.append("The executive summary was cut short.")
     return summary, problems
 
 
-def executive_summary(ask, summary: dict) -> str:
-    """A few sentences written from the finished key points and action items."""
+def _notes(summary: dict) -> str:
+    """The key points and action items, as the executive summary is written from them."""
     notes = "Key points:\n" + "\n".join(f"- {point}" for point in summary["key_points"])
     if summary["action_items"]:
         notes += "\n\nAction items:\n" + "\n".join(f"- {item}" for item in summary["action_items"])
-    answer = ask(EXECUTIVE_PROMPT, f"<notes>\n{notes}\n</notes>", 300).text
+    return notes
+
+
+def _prose(answer: str) -> str:
+    """The model's few sentences as one paragraph, without any headings, bullets or bold it added."""
     answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S)
     lines = [re.sub(r"^(?:[-*•]|\d+[.)])\s+", "", line.strip()) for line in answer.splitlines()]
     return " ".join(line for line in lines if line and not line.startswith("#")).replace("**", "")

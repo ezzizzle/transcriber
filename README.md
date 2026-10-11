@@ -140,6 +140,8 @@ nobody waiting behind a long file, not about total throughput.
   Markdown downloads, and as `warnings` in the JSON formats.
 - **The language model runs out of room** while writing a summary: what it
   wrote is kept, with a warning that key points or action items may be missing.
+- **The language model fails part-way through a summary**: the sections it had
+  finished are kept, with a warning naming the one that is missing.
 - **The speech model fails to load at startup**, or takes more than an hour:
   `/health` reports the error and the server carries on. Each job then tries to
   load it again, and the error clears as soon as one succeeds.

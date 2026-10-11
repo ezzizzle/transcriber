@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from transcriber import cleanup, compare, formats, summary
 from transcriber.audio import pause_before
 from transcriber.jobs import Job, Options
-from transcriber.llm import Answer
+from transcriber.llm import Answer, LanguageModelError
 from transcriber.transcript import Sentence, assign_speakers, build_turns, to_result, tokens_to_words
 
 
@@ -306,7 +306,8 @@ class SummaryTest(unittest.TestCase):
         reply = lambda text: (lambda user: "Fine." if "<notes>" in user else text)
 
         # The model ran out of room. What it wrote is kept, and the reader is told it may not be all.
-        result, problems = summary.summarize(model(reply(complete), cut_off=True), ["x"], diarized=True)
+        ran_out = lambda requests: [Answer(reply(complete)(user), cut_off="<notes>" not in user) for _, user, _ in requests]
+        result, problems = summary.summarize(ran_out, ["x"], diarized=True)
         self.assertEqual(result["action_items"], ["Speaker 1: one"])
         self.assertEqual(problems, ["The summary was cut short, so key points or action items may be missing."])
 
@@ -330,6 +331,45 @@ class SummaryTest(unittest.TestCase):
         result, problems = summary.summarize(ask_many, blocks, diarized=True)
         self.assertEqual(problems, ["The summary for part 2 of 2 of the recording was cut short, so key points or action items may be missing."])
         self.assertEqual(result["key_points"], ["A", "A"])
+
+    def test_trouble_with_the_executive_summary_costs_only_the_executive_summary(self):
+        lists = "## Key points\n- A\n## Action items\n- Speaker 1: one"
+
+        # Cut short: shown as far as it got, with a note.
+        cut_short = lambda requests: [Answer("They met and", cut_off=True) if "<notes>" in user else Answer(lists) for _, user, _ in requests]
+        result, problems = summary.summarize(cut_short, ["x"], diarized=True)
+        self.assertEqual(result["executive_summary"], "They met and")
+        self.assertEqual(problems, ["The executive summary was cut short."])
+
+        # The model fails at this last step: the lists it had already written are kept.
+        def fails_last(requests):
+            if "<notes>" in requests[0][1]:
+                raise LanguageModelError("The language model process crashed.")
+            return [Answer(lists)]
+
+        result, problems = summary.summarize(fails_last, ["x"], diarized=True)
+        self.assertEqual((result["key_points"], result["action_items"]), (["A"], ["Speaker 1: one"]))
+        self.assertEqual(result["executive_summary"], "")
+        self.assertEqual(problems, ["The executive summary is missing. The language model process crashed."])
+
+    def test_a_part_the_model_fails_on_costs_only_that_part(self):
+        def ask_many(requests):
+            (_, user, _), = requests
+            if "second" in user and "<notes>" not in user:
+                raise LanguageModelError("The language model did not answer within 15 minutes.")
+            return [Answer("Fine." if "<notes>" in user else "## Key points\n- Opening\n## Action items\n- Speaker 1: one")]
+
+        blocks = ["Speaker 1: first " + "word " * 6000, "Speaker 2: second " + "word " * 6000]
+        result, problems = summary.summarize(ask_many, blocks, diarized=True)
+        self.assertEqual((result["key_points"], result["executive_summary"]), (["Opening"], "Fine."))
+        self.assertEqual(problems, ["The summary for part 2 of 2 of the recording is missing. The language model did not answer within 15 minutes."])
+
+        # With nothing else to fall back on, there is no summary, and the reason is passed on.
+        def always_fails(requests):
+            raise LanguageModelError("The language model process crashed.")
+
+        self.assertEqual(summary.summarize(always_fails, ["x"], diarized=True),
+                         (None, ["The summary is missing. The language model process crashed."]))
 
     def test_an_unreadable_answer_gives_no_summary(self):
         result, problems = summary.summarize(model(lambda user: "I'm sorry, I can't help with that."), ["x"], diarized=True)

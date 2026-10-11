@@ -94,6 +94,8 @@ A finished job's result is a plain dict, documented at the top of
 - **A cut-off answer is not a complete one.** Clean-up discards an answer that
   hit its token limit; the summary keeps it and adds a warning. Keep checking
   `Answer.cut_off` wherever the model's output is treated as a full list.
+- **A failed summary step costs only that step.** `summary.summarize` keeps
+  the parts and sections already written and reports the rest as problems.
 - **Keep the original next to the cleaned text.** Each turn of a cleaned
   transcript carries `raw_text`, and `compare.changes` is how a person checks
   the model's work: the page's "Show changes" and the `changes` Markdown in
